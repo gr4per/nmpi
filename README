@@ -1,0 +1,7 @@
+# Setup PI
+
+```
+export RASPI_PUB_KEY=/path/to/your/rsa.pub
+./remote_instr.sh
+```
+
