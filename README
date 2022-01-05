@@ -5,3 +5,29 @@ export RASPI_PUB_KEY=/path/to/your/rsa.pub
 ./remote_instr.sh
 ```
 
+manual config on raspi
+sudo adduser ubuntu tty
+sudo adduser ubuntu dialout
+
+sudo systemctl stop serial-getty@ttyS0.service
+sudo systemctl disable serial-getty@ttyS0.service
+sudo systemctl mask serial-getty@ttyS0.service
+
+sudo apt-get install setserial
+sudo apt install net-tools
+sudo apt install python3.8
+
+# changes in config files
+cmdline.txt: remove console=serial0,115200
+
+usercfg.txt: 
+dtoverlay=disable-bt
+
+network-config: 
+wifis:
+  wlan0:
+    dhcp4: true
+    optional: true
+    access-points:
+      <insert ssid here>:
+        password: "<insert password here>"
