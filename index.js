@@ -62,24 +62,34 @@ class MeasurementBuffer {
     if(this.topTime.getTime() - this.startTime.getTime() < dt) {
       dt = (this.topTime.getTime()-this.startTime.getTime());
     }
+    let idx = this.idx;
     let start5m = idx - dt/1000;
-    if(idx < 0) idx = idx-this.size;
+    if(start5m < 0) start5m = start5m-this.size;
     console.log("5m start idx = " + this.getTime(start5m));
+    this.aggregateWindow(start5m, "leq_5m");
+
+    // define 1h window
+    let start1h = idx+1;
+    if(start1h > this.size-1)start1h = start1h-this.size;
+    this.aggregateWindow(start1h, "leq_1h");
+  }
+
+  aggregateWindow(startIdx, name) {	  
     let target = this.buf[this.idx];
-    target.leq_5m = {};
-    for(let l of Object.keys(target.ee))target.leq_5m[l]=0;
+    target[name] = {};
+    for(let l of Object.keys(target.ee))target[name][l]=0;
     let binCount = 0;
-    for(let i = start5m; idx != this.idx) {
+    for(let i = startIdx; idx != this.idx) {
       if(i > this.size-1) i = 0;
       for(let l of Object.keys(target.ee)){
-	 target.leq_5m[l] += this.buf[i].ee[l];
+	 target[name][l] += this.buf[i].ee[l];
       }
       binCount++;
     }
     //now divide energy equivalent by bins (=s) to get power, then convert to SPL
-    for(let l of Object.keys(target.leq_5m)) {
-      target.leq_5m[l] /= binCount;
-      target.leq_5m[l] = 10*Math.log10(target.leq_5m[l]);
+    for(let l of Object.keys(target[name])) {
+      target[name][l] /= binCount;
+      target[name][l] = 10*Math.log10(target[name][l]);
     }
   }
 
