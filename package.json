@@ -1,0 +1,22 @@
+{
+  "name": "nmpi",
+  "version": "1.0.0",
+  "description": "Noise Monitoring via Raspberry Pi 4B",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gr4per/nmpi.git"
+  },
+  "author": "gr4per",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/gr4per/nmpi/issues"
+  },
+  "homepage": "https://github.com/gr4per/nmpi#readme",
+  "dependencies": {
+    "serialport": "^9.2.8"
+  }
+}
