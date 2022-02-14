@@ -1,0 +1,44 @@
+nmpi:
+
+List of things to be done
+
+1. Remote access
+-Figure out whether SSH stays open even after sshd shuts down port for listening
+-Configure cron to activate sshd once an hour for 2 minutes on pre determined port (rule based)
+
+2. Remote config / software updates
+-Add timeout to nmpi to regularly check for parameter update (file on storage account)
+and consume it
+-Add timeout to look for new code on storage account and download then stop nodejs and start new service
+
+3. Robustness
+-Define stragey to deal with dropped measurement values
+-Make sure when Raspi powers up, nmpi is started
+-Make sure when nmpi starts it will pre-fill buffer with current values from storage account if available
+-Make sure when nmpi starts, it will set time on PCE 430, set measurement config to expected values and start measurement if not running
+-Make sure if nmpi misses a tick, it will set fill value (empty?) to buffer
+
+4. Back end
+-create state diagram for program flow
+-Add 1 hour cyclic buffer to nmpi
+-On tick, store new value to buffer, also add energy equivalent and update floating 1 hour window energy and 5 min window energy, add 5 minute Leq values, add 1 hour Leq values
+DONE -Check whether Latz was giving model value for LAeq ( yes -> 85.3 dBA, see page 12, table 5.5)
+-On tick, update new data to storage account (create or append)
+-Manage 1 file per hour on storage with 3600 values
+-add storage account creds for uploading data
+-pick blob type for append into block
+-on top of the hour, switch file name
+-time service synchronization
+
+5. Front end
+-create traffic light view, large, one row per interesting value (LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), color code 
+-create rolling graph view, one per interesting value(LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), also current gain reduction per band
+-create control to review old data on graph view (from-to interval, if to is open, then roll)
+-when initializing view/interval, pull data from storage account
+-when in rolling mode, continuously load any new lines of current file
+-on top of the hour, switch file name
+-adjust to viewport of device
+
+6. General 
+Create algorithm to extrapolate SPL reserve for 1 hour window based on data so far
+

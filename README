@@ -1,11 +1,20 @@
-# Setup PI
+# Desktop system
+
+## Setup PI
 
 ```
 export RASPI_PUB_KEY=/path/to/your/rsa.pub
 ./remote_instr.sh
 ```
 
-manual config on raspi
+## local shell to ssh to PI
+eval $(ssh-agent -s)
+ssh-add /d/HiDrive/ssh/raspi_arne_rsa
+ssh -p 58736 ubuntu@ubuntu
+
+# PI
+
+## manual one time config on raspi
 sudo adduser ubuntu tty
 sudo adduser ubuntu dialout
 
@@ -13,11 +22,22 @@ sudo systemctl stop serial-getty@ttyS0.service
 sudo systemctl disable serial-getty@ttyS0.service
 sudo systemctl mask serial-getty@ttyS0.service
 
-sudo apt-get install setserial
-sudo apt install net-tools
-sudo apt install python3.8
 
-# changes in config files
+##required tools
+sudo apt install nodejs
+sudo apt install npm
+npm install 
+sudo apt install alsa-utils
+
+## for the uca202, add this to /etc/asound.conf
+pcm.!default    front:CODEC # USB Soundcard
+ctl.!default    {
+    type hw
+    card CODEC
+}
+
+
+## changes in config files
 cmdline.txt: remove console=serial0,115200
 
 usercfg.txt: 
@@ -31,3 +51,25 @@ wifis:
     access-points:
       <insert ssid here>:
         password: "<insert password here>"
+
+## optional tools
+sudo apt-get install setserial
+sudo apt install net-tools
+sudo apt install python3.8
+
+## local git 
+eval $(ssh-agent -s)
+ssh-add ~/.ssh/github_gr4per_rsa
+git push
+
+
+# Aggregation 
+
+In order to aggregate L<X>eq,1s levels to longer period L<X>eq levels we need to add Energies and divide total Energy over total time to get the equivalent power.
+Since Lp = 20 log (p/p0) (and hence p0* 10^(Lp/20) = p) and P ~ Ap^2 it follows that E = P*dt 
+and hence E ~ dt*A* p0^2*10^(Lp/10)
+Etot ~ A*p0^2* SUM_i(10^(Lpi/10)*dti)
+and Ptot ~ A*p0^2* SUM_i(10^(Lpi/10)*dti)/SUM_i(dti)
+with this the total equivalent SPL is
+ptot^2 = Ptot/A => ptot^2 = p0^2 * SUM_i(10^(Lpi/10)*dti)/T
+and Lptot = 20 log (ptot/p0)
