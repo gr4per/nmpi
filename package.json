@@ -17,6 +17,9 @@
   },
   "homepage": "https://github.com/gr4per/nmpi#readme",
   "dependencies": {
-    "serialport": "^9.2.8"
+    "@azure/storage-blob": "^12.8.0",
+    "@types/dotenv": "^8.2.0",
+    "dotenv": "^16.0.0",
+    "serialport": "^10.3.0"
   }
 }

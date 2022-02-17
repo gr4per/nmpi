@@ -1,24 +1,33 @@
 const fs = require('fs');
-const SerialPort = require('serialport')
-const Readline = SerialPort.parsers.Readline
-const Delimiter = require('@serialport/parser-delimiter')
+const {SerialPort} = require('serialport')
+const {ReadlineParser} = require('@serialport/parser-readline');
+const {DelimiterParser} = require('@serialport/parser-delimiter')
+const {BlobServiceClient} = require('@azure/storage-blob');
 
-const serialUSB = new SerialPort("/dev/ttyUSB0", {baudRate: 9600});
-const serialAMA = new SerialPort("/dev/ttyAMA0", {baudRate: 9600});
-const ID = 1;
+const serialUSB = new SerialPort({path:"/dev/ttyUSB0", baudRate: 9600});
+const serialAMA = new SerialPort({path:"/dev/ttyAMA0", baudRate: 9600});
+const config = require("./config.json");
 
+let ID = 1;
 let deviceState = 0;
+
+let blobServiceClient;
+let containerClient;
 
 class MeasurementBuffer {
   constructor(size) {
     this.size = 3600;
+    this.currentSize = 0;
     this.buf = new Array(this.size);
-    this.idx = this.size-1;
+    this.idx = this.size-1; // pointing to top, i.e. last written record
     this.startIdx = this.idx;
-    this.startTime = new Date(new Date().getTime()/1000*1000); // put on full second
-    this.topTime = this.startTime;
+    this.startTime = new Date(new Date().getTime()/1000*1000); // put on full second, this is the integration END time of the interval covered by the bin
+    this.topTime = this.startTime; // again, this is the END time of the interval, i.e. bin 13:26:47 covers integration from 13:26:46-13:26:47
+  }
+
+  init() {
     for(let i = this.idx; i >= 0;i--) {
-      this.buf[i] = {time:new Date(this.startTime.getTime()-1000*i),leq_s:{a:0,b:0,c:0,z:0,o8:0,o16:0,o31:0,o63:0,o125:0,o250:0,o500:0,o1k:0,o2k:0,o4k:0,o8k:0,o16k:0},leq_5m:{a:0,b:0,c:0,z:0,o8:0,o16:0,o31:0,o63:0,o125:0,o250:0,o500:0,o1k:0,o2k:0,o4k:0,o8k:0,o16k:0},leq_1h:{a:0,b:0,c:0,z:0,o8:0,o16:0,o31:0,o63:0,o125:0,o250:0,o500:0,o1k:0,o2k:0,o4k:0,o8k:0,o16k:0}};
+      this.set(i, [this.getTime(i),0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]);
     }
   } 
   
@@ -48,11 +57,13 @@ class MeasurementBuffer {
   }
 
   set(index, valueArr) {
-    let t = this.getTime(idx);
-    this.buf[i] = {time: t,leq_s:{a:valueArr[0],b:valueArr[1],c:valueArr[2],z:valueArr[3],o8:valueArr[4],o16:valueArr[5],o31:valueArr[6],o63:valueArr[7],o125:valueArr[8],o250:valueArr[9],o500:valueArr[10],o1k:valueArr[11],o2k:valueArr[12],o4k:valueArr[13],o8k:valueArr[14],o16k:valueArr[15]};
-    this.buf[i].ee = {};
-    for(let l of Object.keys(this.buf[i].leq_s)) {
-      this.buf[i].ee[l] = this.getSPLEnergyEquivalent(this.buf[i].leq_s[l]);
+    valueArr = valueArr.slice();
+    let t = this.getTime(index);
+    let rt = valueArr.shift();
+    this.buf[index] = {time: t,respTime:rt,leq_s:{a:valueArr[1],b:valueArr[2],c:valueArr[3],z:valueArr[4],t6:valueArr[5],t8:valueArr[6],t10:valueArr[7],t12:valueArr[8],t16:valueArr[9],t20:valueArr[10],t25:valueArr[11],t31:valueArr[12],t40:valueArr[13],t50:valueArr[14],t63:valueArr[15],t80:valueArr[16],t100:valueArr[17],t125:valueArr[18],t160:valueArr[19],t200:valueArr[20],t250:valueArr[21],t315:valueArr[22],t400:valueArr[23],t500:valueArr[24],t630:valueArr[25],t800:valueArr[26],t1000:valueArr[27],t1250:valueArr[28],t1600:valueArr[29],t2000:valueArr[30],t2500:valueArr[31],t3150:valueArr[32],tk4:valueArr[33],tk5:valueArr[34],t6k:valueArr[35],t8k:valueArr[36],t10k:valueArr[37],t12k:valueArr[38],t16k:valueArr[39],t20k:valueArr[40]},ee:{}};
+    //console.log("set, valueArr = " + JSON.stringify(valueArr)+ "\nlen = " + valueArr.length + "\nrecord so far:" + JSON.stringify(this.buf[index],null,2)+"\nleq_s keys: " + JSON.stringify(Object.keys(this.buf[index]["leq_s"])));
+    for(let l of Object.keys(this.buf[index]["leq_s"])) {
+      this.buf[index].ee[l] = this.getSPLEnergyEquivalent(this.buf[index]["leq_s"][l]);
     }
   }
 
@@ -64,42 +75,73 @@ class MeasurementBuffer {
     }
     let idx = this.idx;
     let start5m = idx - dt/1000;
-    if(start5m < 0) start5m = start5m-this.size;
-    console.log("5m start idx = " + this.getTime(start5m));
+    if(start5m < 0) start5m = this.size+start5m;
+    console.log("5m start idx = " + start5m + ", time = " + this.getTime(start5m));
     this.aggregateWindow(start5m, "leq_5m");
 
     // define 1h window
     let start1h = idx+1;
     if(start1h > this.size-1)start1h = start1h-this.size;
+    console.log("1h start index is " + start1h + ", time = " + this.buf[start1h].time);
     this.aggregateWindow(start1h, "leq_1h");
   }
 
   aggregateWindow(startIdx, name) {	  
     let target = this.buf[this.idx];
+    //console.log("aggregate " + name + ", target " + this.idx + ": " + JSON.stringify(target));
     target[name] = {};
     for(let l of Object.keys(target.ee))target[name][l]=0;
     let binCount = 0;
-    for(let i = startIdx; idx != this.idx) {
-      if(i > this.size-1) i = 0;
+    let si = startIdx;
+    if(si > this.idx)si-=this.size;
+    for(let ni = si; ni < this.idx+1;ni++) {
+      let i = ni;
+      if(ni<0)i+=this.size; // ni can be negative and is counting up towards idx. i needs to be positive, so we map it to buf range
+      //console.log("adding from " + i + " (ni=" + ni + "): ");// + JSON.stringify(this.buf[i],null,2));
       for(let l of Object.keys(target.ee)){
-	 target[name][l] += this.buf[i].ee[l];
+	//console.log("i=" + i + " adding value with label " + l + " to target from row " + JSON.stringify(this.buf[i])); 
+	target[name][l] += this.buf[i]["ee"][l];
       }
       binCount++;
     }
+    console.log("binCount = " + binCount);
     //now divide energy equivalent by bins (=s) to get power, then convert to SPL
-    for(let l of Object.keys(target[name])) {
+    for(let l of Object.keys(target["ee"])) {
       target[name][l] /= binCount;
       target[name][l] = 10*Math.log10(target[name][l]);
     }
+    console.log("aggregate window done");
   }
 
   push(valueArr) {
+    if(this.currentSize == 0) { // on first push we set start time
+      this.topTime = new Date(new Date().getTime()/1000*1000); // put on full second
+      this.startTime = this.topTime;
+    }
+    else {
+      this.topTime = new Date(this.topTime.getTime()+1000);
+    }
+
     let prevIdx = this.idx;
-    this.idx++:
+    this.idx++; // point to new top frame
     if(this.idx > this.size-1) this.idx = 0;
-    this.topTime = new Date(this.topTime.getTime()+1000);
     this.set(this.idx, valueArr);
-    calculateWindowValues();
+    this.currentSize++;
+    if(this.currentSize > this.size)this.currentSize = this.size;
+    console.log("push to " + this.idx + " ready, size now " + this.currentSize + " bins");
+    this.calculateWindowValues();
+  }
+
+  convertTopEntryToCsvLine() {
+    let toTime = this.buf[this.idx].time; //getTime(this.idx);
+    let line = toTime.toISOString().substring(0,19) + "\t" + this.buf[this.idx].respTime.toISOString() + "\t";
+    for(let c of ["leq_s"]){ //,"leg_5m","leq_1h", "ee"]) {
+      for(let vk of Object.keys(this.buf[this.idx][c])) {
+        line += this.buf[this.idx][c][vk] + "\t";
+      }
+    }
+    line += "\r\n";
+    return line;
   }
 }
 
@@ -113,7 +155,7 @@ function zeroPad(number, digits) {
   return res;
 }
 
-const parserUSB = serialUSB.pipe(new Delimiter({delimiter: '\n'}));
+const parserUSB = serialUSB.pipe(new DelimiterParser({delimiter: '\n'}));
 let responsePromise = null;
 parserUSB.on('data', (data) => { 
   
@@ -121,8 +163,12 @@ parserUSB.on('data', (data) => {
   console.log("received on serial (USB): " + data.toString()); 
   let start = 0;
   while(data[start] != 0x2) {
-    console.err("invalid response byte " + data[start] + ", skipping until <STX> (0x02) is received.");
+    console.error("invalid response byte " + data[start] + ", skipping until <STX> (0x02) is received.");
     start++;
+    if(start >= data.length) {
+      console.error("reached data end without <STX>");
+      return;
+    }
   }
   let pos = start+1;
   let clientID = data[pos++];
@@ -151,15 +197,10 @@ parserUSB.on('data', (data) => {
   
   if(attr == 0x41) {
     console.log("Response is data block: " + response);
-    if(responsePromise && responsePromise.commandName == "DOT") {
-      let filename = 'remm_'+responsePromise.start.toISOString().substring(0,13)+zeroPad(responsePromise.start.getUTCMinutes(),2);
-      filename += zeroPad(responsePromise.start.getUTCSeconds(),2)+".oct";
-      if(!fs.existsSync(filename)) {
-        fs.appendFileSync(filename, "Date\tTime\tFilter\tLAeq\tLBeq\tLCeq\tLZeq\t8Hz\t16Hz\t31.5Hz\t63Hz\t125Hz\t250Hz\t500Hz\t1kHz\t2kHz\t4kHz\t8kHz\t16kHz\r\n");
-      }
-      fs.appendFileSync(filename, respTime.toISOString().substring(0,10) + "\t" + zeroPad(respTime.getUTCHours(),2)+zeroPad(respTime.getUTCMinutes(),2)+zeroPad(respTime.getUTCSeconds(),2)+".0\t"+response.replace(/,/g,"\t")+"\r\n");
+    if(responsePromise && responsePromise.commandName == "DTT") {
+      handleMeasurementResponse(respTime, dataStr);
     }
-    if(responsePromise)responsePromise.resolve(dataStr);
+    if(responsePromise)responsePromise.resolve(response);
     return;
   }
   else if(attr == 0x6) {
@@ -169,14 +210,13 @@ parserUSB.on('data', (data) => {
   }
   else if(attr == 0x15) {
     console.error("Client sends error response: ");
-    if(responsePromise)responsePromise.reject(dataStr);
+    if(responsePromise)responsePromise.reject(response);
     return;
   }
 
 });
 
-const parserAMA = new Readline();
-serialAMA.pipe(parserAMA);
+let parserAMA = serialAMA.pipe(new ReadlineParser({delimiter: '\r\n'}));
 parserAMA.on('data', (data) => { console.log("received on AMA:"+data);});
 
 function serialCommand(commandName) {
@@ -190,7 +230,7 @@ function serialCommand(commandName) {
     let payload = new Uint8Array(1024);
   let payloadBytes = 0;
   payload[payloadBytes++] = 0x2;
-  payload[payloadBytes++] = commandName == "IDX" ? 0 : (ID&0xff);
+  payload[payloadBytes++] = (ID&0xff); //commandName == "IDX" ? 0 : (ID&0xff);
   payload[payloadBytes++] = "C".charCodeAt(0);
   for(let i = 0; i < arguments.length; i++) {
     if(i>1) payload[payloadBytes++] = " ".charCodeAt(0); // space between params
@@ -230,13 +270,24 @@ function sleep(millis) {
 async function discoverDevice() {
   while(deviceState == 0) {
     try {
-      let res = await serialCommand("IDX","?");
-      console.log("Received ID " + res + " from IDX? broadcast");
-      ID = parseInt(res);
+      let res = await serialCommand("STA","?");
+      console.log("Received from STA?: '\n" + res + "\n'");
+      let mState = parseInt(res);
+      if(mState == 1) {
+        console.log("Measurement is running, stopping...");
+	try {
+          res = await serialCommand("STA","0");
+	  console.log("stopped");
+	}
+	catch(e) {
+	  console.error("Stopping measurement failed: ", e);
+	}
+
+      }
       deviceState = 1;
     }
     catch(e) {
-      console.error("Error finding device via broadcast: ",e);
+      console.error("Error discovering device " + ID + ": " ,e);
       await sleep(1000);
     }
   }
@@ -255,7 +306,7 @@ async function updateDeviceClock() {
 
 
 function getFileName(time) {
-  return ""+time.getUTCYear()+"/"+time.getUTCMonth()+"/"+time.getUTCDay()+"/"+time.getUTCHour()+".csv";
+  return "buffer/"+getCloudFileNameForEndTime(time);
 }
 
 async function applyCsvToBuffer(csv) {
@@ -271,6 +322,8 @@ async function applyCsvToBuffer(csv) {
 
 async function initBuffer() {
   measBuffer = new MeasurementBuffer(3600);
+  measBuffer.init();
+
   // load current hour file
   let fn = getFileName(measBuffer.startTime);
   try {
@@ -293,6 +346,123 @@ async function initBuffer() {
 
 }
 
+async function initBlobClient() {
+  let connStr = config.storageConnectionString;
+  if(!connStr || connStr.length == 0) throw "No connection string in config!";
+  blobServiceClient = BlobServiceClient.fromConnectionString(config.storageConnectionString);
+  containerClient = blobServiceClient.getContainerClient(config.containerName);
+  
+}
+
+async function startMeasurement() {
+  await serialCommand("STA","1");
+  console.log("Measurement started");
+  await serialCommand("DTT","2","?");
+//  setInterval(() => {
+//    serialCommand("DTT","1","?");
+//  },30000);
+}
+
+function getCloudFileNameForEndTime(time) {
+  let filename = "";
+  try {
+    filename = time.toISOString().substring(0,4)+"/"+zeroPad(time.getUTCMonth()+1,2)+"/"+zeroPad(time.getUTCDate(),2)+"/"+zeroPad(time.getUTCHours(),2)+".csv";
+  }
+  catch(e) {
+    console.log("no valid time for filename: " + time);
+  }
+  return filename;
+}
+
+let syncing = 0;
+async function syncToCloud(){
+  if(syncing) return;
+  syncing = 1;
+  let bufferFiles = await new Promise((resolve,reject)=> {
+    fs.readdir("buffer", (err,files) => {
+      if(err) { reject(err); return; }
+      resolve(files);
+    });
+  });
+  let fc = 0;
+  for(let bfn of bufferFiles) {
+	  
+    let dataLines = await new Promise((resolve, reject) => {
+      fs.readFile("buffer/"+bfn, {encoding:'utf8'}, (err, data) => {
+        if(err) {reject(err); return; }
+	resolve(data);
+      });
+    });
+    console.log("read "  +dataLines.length + " bytes from upload buffer file " + bfn);
+    if(dataLines.length > 0) {
+      let fn = bfn.split('_').join('/');
+      console.log("corresponding cloud file is " + fn );
+      if(await appendToBlob(fn, dataLines, false)) {
+        console.log("appended successfully to blob");
+	fc++;
+	await new Promise((resolve, reject) => {
+	  fs.unlink("buffer/"+bfn, (err)=> {
+            if(err) {reject(err);return;}
+	    resolve();
+	  });
+	});
+      }
+    }
+  }// end loop over bufferFiles
+  console.log("endSyncToCloud, files synced: " + fc + " out of " + bufferFiles.length);
+  syncing = 0;
+}
+
+async function pushTopDataRowToCloud(flush){  
+  // convert top row in internal buffer to csv line
+  let csvLine = measBuffer.convertTopEntryToCsvLine();
+  let fn = getCloudFileNameForEndTime(new Date(measBuffer.topTime.getTime())).split('/').join('_');
+  
+  fs.appendFile("buffer/" + fn, csvLine, (err) => {
+    if(err) {console.error("failed to push csvLine to local buffer file " + fn + ": ", err); return;} 
+    console.log("line added to local buffer file " + fn+ ": " + csvLine);
+    if(flush)syncToCloud();
+  });
+}
+
+async function appendToBlob(fn, data, appendToBuffer) {
+  let appendBlobCLient = null;
+  try {
+    appendBlobClient = await containerClient.getAppendBlobClient(fn);
+    let ciner = await appendBlobClient.createIfNotExists();
+    if(ciner.succeeded) {
+      data = "IntervalEnd\tRespTime\tLeqA\tLeqB\tLeqC\tLeqZ\tLeq6.3Hz\tLeq8Hz\tLeq10Hz\tLeq12.5Hz\tLeq16Hz\tLeq20Hz\tLeq25Hz\tLeq31.5Hz\tLeq40Hz\tLeq50Hz\tLeq63Hz\tLeq80Hz\tLeq100Hz\tLeq125Hz\tLeq160Hz\tLeq200Hz\tLeq250Hz\tLeq315Hz\tLeq400Hz\tLeq500Hz\tLeq630Hz\tLeq800Hz\tLeq1kHz\tLeq1.25kHz\tLeq1.6kHz\tLeq2kHz\tLeq2.5kHz\tLeq3.15kHz\tLeq4kHz\tLeq5kHz\tLeq6.3kHz\tLeq8kHz\tLeq10kHz\tLeq12.5kHz\tLeq16kHz\tLeq20kHz\r\n"+data;
+    }
+    await appendBlobClient.appendBlock(data, data.length);
+    console.log("appended " + data + " to blob");
+    return true;
+  }
+  catch(e) {
+    console.error("Failed to append to blob " + fn + ":",e);
+    if(appendToBuffer) {
+      fs.appendFileSync(bufferFile, data);
+      console.log("added to local buffer");
+    }
+    return false;
+  }
+}
+
+async function handleMeasurementResponse(respTime, dataStr) {
+  let vArr = [new Date(), 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]; 
+  // add to internal buffer
+//  while(measBuffer.currentSize > 0 && respTime.getTime()-measBuffer.topTime.getTime() > 1000) {
+//    console.log("internal buffer topTime " + measBuffer.topTime + " is > 1s before respTime " + respTime);
+//    vArr[0] = new Date(measBuffer.topTime.getTime()+1000);
+//    measBuffer.push(vArr); // add an all zero record to fill the gap
+//    pushTopDataRowToCloud(false);
+//  }
+  dataStr = "0,"+dataStr;
+  vArr = dataStr.split(",").map((x)=> {return parseFloat(x);});
+  vArr[0] = respTime;
+  measBuffer.push(vArr);
+  pushTopDataRowToCloud(true);
+}
+
 async function startup() {
   await discoverDevice();
 
@@ -300,6 +470,9 @@ async function startup() {
   
   await initBuffer();
 
+  await initBlobClient();
+
+  await startMeasurement();
 }
 
 async function run() {
@@ -307,7 +480,7 @@ async function run() {
   while(state == "startup") {
     try {
       await startup();
-      state = running;
+      state = "running";
       console.log("startup completed successfully.");
     }
     catch(e) {
@@ -316,23 +489,6 @@ async function run() {
     }
   }
 
-  let ct = new Date();
-  await discoverDevice();
-
-  try {
-    await updateDeviceClock();
-  }
-  catch(e) {
-    console.error("Error in startup ",e);
-  }
-
-  await serialCommand("HOR",""+ct.getHours(),""+ct.getMinutes(),""+ct.getSeconds());
-
-  //await serialCommand("MEM","0");
-
-  await serialCommand("STA", "0");
-
-//  await serialCommand("DOT","2", "?");
 }
 
 run();
