@@ -5,4 +5,4 @@ buffer/
 *.oct
 *.wav
 log.txt
-
+.index.js.swp
