@@ -14,6 +14,18 @@ let deviceState = 0;
 let blobServiceClient;
 let containerClient;
 
+let logfn = console.log
+console.log = function(){
+  let args = Array.from(arguments);
+  let datePf = "" + new Date().toISOString() + ": ";
+  if(typeof args[0] == "string") {
+    args[0] = datePf + args[0];
+  }
+  else {
+    args.unshift("" + new Date().toISOString() + ": ");
+  }
+  logfn(...args);
+}
 class MeasurementBuffer {
   constructor(size) {
     this.size = 3600;
@@ -358,9 +370,10 @@ async function startMeasurement() {
   await serialCommand("STA","1");
   console.log("Measurement started");
   await serialCommand("DTT","2","?");
+//  await sleep(1000);
 //  setInterval(() => {
 //    serialCommand("DTT","1","?");
-//  },30000);
+//  },1000);
 }
 
 function getCloudFileNameForEndTime(time) {
@@ -378,7 +391,7 @@ let syncing = 0;
 async function syncToCloud(){
   if(syncing) return;
   syncing = 1;
-  let bufferFiles = await new Promise((resolve,reject)=> {
+  /*let bufferFiles = await new Promise((resolve,reject)=> {
     fs.readdir("buffer", (err,files) => {
       if(err) { reject(err); return; }
       resolve(files);
@@ -409,20 +422,42 @@ async function syncToCloud(){
       }
     }
   }// end loop over bufferFiles
-  console.log("endSyncToCloud, files synced: " + fc + " out of " + bufferFiles.length);
+  */
+  let csvLine = null;
+  let lc = 0;
+  let totalLines = syncBuf.length;
+  while(syncBuf.length > 0){ 
+    csvLine = syncBuf.shift();
+    let csvTime = csvLine.split("\t")[1];
+    console.log("csvTime = " + csvTime);
+    csvTime = new Date(csvTime);
+    console.log("csvTime = " + csvTime);
+    let fn = getCloudFileNameForEndTime(csvTime);
+    if(await appendToBlob(fn, csvLine, false)) {
+      console.log("appended successfully to blob");
+      syncBuf.shift();
+    }
+    else break;
+  }
+  console.log("endSyncToCloud, lines synced: " + lc + " out of " + totalLines);
+
   syncing = 0;
 }
+
+const syncBuf = new Array(0);
 
 async function pushTopDataRowToCloud(flush){  
   // convert top row in internal buffer to csv line
   let csvLine = measBuffer.convertTopEntryToCsvLine();
-  let fn = getCloudFileNameForEndTime(new Date(measBuffer.topTime.getTime())).split('/').join('_');
+  let fn = getCloudFileNameForEndTime(measBuffer.buf[measBuffer.idx].respTime).split('/').join('_');//new Date(measBuffer.topTime.getTime())).split('/').join('_');
   
-  fs.appendFile("buffer/" + fn, csvLine, (err) => {
-    if(err) {console.error("failed to push csvLine to local buffer file " + fn + ": ", err); return;} 
-    console.log("line added to local buffer file " + fn+ ": " + csvLine);
-    if(flush)syncToCloud();
-  });
+  syncBuf.push(csvLine);
+  if(flush) syncToCloud();
+  //fs.appendFile("buffer/" + fn, csvLine, (err) => {
+  //  if(err) {console.error("failed to push csvLine to local buffer file " + fn + ": ", err); return;} 
+  //  console.log("line added to local buffer file " + fn+ ": " + csvLine);
+    //if(flush)syncToCloud();
+  //});
 }
 
 async function appendToBlob(fn, data, appendToBuffer) {

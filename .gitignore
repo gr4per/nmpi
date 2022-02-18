@@ -1,5 +1,8 @@
 node_modules
 package-lock.json
 config.json
+buffer/
 *.oct
 *.wav
+log.txt
+
