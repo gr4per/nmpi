@@ -13,6 +13,7 @@ let deviceState = 0;
 
 let blobServiceClient;
 let containerClient;
+let lastTimeSync = null;
 
 let logfn = console.log
 console.log = function(){
@@ -26,6 +27,7 @@ console.log = function(){
   }
   logfn(...args);
 }
+
 class MeasurementBuffer {
   constructor(size) {
     this.size = 3600;
@@ -39,7 +41,11 @@ class MeasurementBuffer {
 
   init() {
     for(let i = this.idx; i >= 0;i--) {
-      this.set(i, [this.getTime(i),0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]);
+      let ev = [this.getTime(i),0]; // time and filter setting, now add the bands ...
+      for(let j = 0; j < bands.length; j++) {
+        ev.push(0.0);
+      }
+      this.set(i, ev);
     }
   } 
   
@@ -75,6 +81,11 @@ class MeasurementBuffer {
     this.buf[index] = {time: t,respTime:rt,leq_s:{a:valueArr[1],b:valueArr[2],c:valueArr[3],z:valueArr[4],t6:valueArr[5],t8:valueArr[6],t10:valueArr[7],t12:valueArr[8],t16:valueArr[9],t20:valueArr[10],t25:valueArr[11],t31:valueArr[12],t40:valueArr[13],t50:valueArr[14],t63:valueArr[15],t80:valueArr[16],t100:valueArr[17],t125:valueArr[18],t160:valueArr[19],t200:valueArr[20],t250:valueArr[21],t315:valueArr[22],t400:valueArr[23],t500:valueArr[24],t630:valueArr[25],t800:valueArr[26],t1000:valueArr[27],t1250:valueArr[28],t1600:valueArr[29],t2000:valueArr[30],t2500:valueArr[31],t3150:valueArr[32],tk4:valueArr[33],tk5:valueArr[34],t6k:valueArr[35],t8k:valueArr[36],t10k:valueArr[37],t12k:valueArr[38],t16k:valueArr[39],t20k:valueArr[40]},ee:{}};
     //console.log("set, valueArr = " + JSON.stringify(valueArr)+ "\nlen = " + valueArr.length + "\nrecord so far:" + JSON.stringify(this.buf[index],null,2)+"\nleq_s keys: " + JSON.stringify(Object.keys(this.buf[index]["leq_s"])));
     for(let l of Object.keys(this.buf[index]["leq_s"])) {
+      if(isNaN(this.buf[index]["leq_s"][l])) {
+        console.log("cannot set valueArr " + JSON.stringify(valueArr) + ": value '" + l + "'=" + this.buf[index]["leq_s"][l] + " is not a number. leq_s["+index+"] = " + JSON.stringify(this.buf[index]["leq_s"]));
+	console.error(new Error("this didnt work out as expected"))
+	process.exit(1);
+      }
       this.buf[index].ee[l] = this.getSPLEnergyEquivalent(this.buf[index]["leq_s"][l]);
     }
   }
@@ -96,6 +107,7 @@ class MeasurementBuffer {
     if(start1h > this.size-1)start1h = start1h-this.size;
     console.log("1h start index is " + start1h + ", time = " + this.buf[start1h].time);
     this.aggregateWindow(start1h, "leq_1h");
+
   }
 
   aggregateWindow(startIdx, name) {	  
@@ -125,7 +137,16 @@ class MeasurementBuffer {
     console.log("aggregate window done");
   }
 
+  /* takes a value array as argument that has Date object (measurement arrival time) at index 0,
+   * filter setting 0 = Z at index 1,
+   * followed by one float per band for the 1/3 octave leq values
+   */
   push(valueArr) {
+    if(valueArr.length != bands.length+2) {
+      console.log("cannot push " + JSON.stringify(valueArr) + ", incorrect size ");
+      console.error(new Error("oh oh"));
+      process.exit(1);
+    }
     if(this.currentSize == 0) { // on first push we set start time
       this.topTime = new Date(new Date().getTime()/1000*1000); // put on full second
       this.startTime = this.topTime;
@@ -142,12 +163,19 @@ class MeasurementBuffer {
     if(this.currentSize > this.size)this.currentSize = this.size;
     console.log("push to " + this.idx + " ready, size now " + this.currentSize + " bins");
     this.calculateWindowValues();
+    this.buf[this.idx]["attn"] = {};//initialize attenuation
+    for(let i = 0;i< bands.length;i++) {
+      this.buf[this.idx]["attn"][bands[i]]=0.0;
+      if(attnInfo[bands[i]]) {
+        this.buf[this.idx]["attn"][bands[i]]=attnInfo[bands[i]].level;
+      }
+    }
   }
 
   convertTopEntryToCsvLine() {
     let toTime = this.buf[this.idx].time; //getTime(this.idx);
     let line = toTime.toISOString().substring(0,19) + "\t" + this.buf[this.idx].respTime.toISOString() + "\t";
-    for(let c of ["leq_s"]){ //,"leg_5m","leq_1h", "ee"]) {
+    for(let c of ["leq_s","leq_5m","leq_1h","attn"]) {
       for(let vk of Object.keys(this.buf[this.idx][c])) {
         line += this.buf[this.idx][c][vk] + "\t";
       }
@@ -210,7 +238,7 @@ parserUSB.on('data', (data) => {
   if(attr == 0x41) {
     console.log("Response is data block: " + response);
     if(responsePromise && responsePromise.commandName == "DTT") {
-      handleMeasurementResponse(respTime, dataStr);
+      handleMeasurementResponse(respTime, response);
     }
     if(responsePromise)responsePromise.resolve(response);
     return;
@@ -310,9 +338,11 @@ async function updateDeviceClock() {
   try {
     await serialCommand("HOR",""+ct.getHours(),""+ct.getMinutes(),""+ct.getSeconds());
     console.log("device time updated: " + ct);
+    lastTimeSync = ct;
   }
   catch(e) {
     console.error("Error setting device time ",e);
+    process.exit(1);
   }
 }
 
@@ -427,15 +457,15 @@ async function syncToCloud(){
   let lc = 0;
   let totalLines = syncBuf.length;
   while(syncBuf.length > 0){ 
-    csvLine = syncBuf.shift();
+    csvLine = syncBuf[0];
     let csvTime = csvLine.split("\t")[1];
-    console.log("csvTime = " + csvTime);
+    console.log("csvTime of syncBuf["+lc+"]= " + csvTime);
     csvTime = new Date(csvTime);
-    console.log("csvTime = " + csvTime);
     let fn = getCloudFileNameForEndTime(csvTime);
     if(await appendToBlob(fn, csvLine, false)) {
       console.log("appended successfully to blob");
       syncBuf.shift();
+      lc++;
     }
     else break;
   }
@@ -444,7 +474,7 @@ async function syncToCloud(){
   syncing = 0;
 }
 
-const syncBuf = new Array(0);
+const syncBuf = [];
 
 async function pushTopDataRowToCloud(flush){  
   // convert top row in internal buffer to csv line
@@ -460,16 +490,66 @@ async function pushTopDataRowToCloud(flush){
   //});
 }
 
-async function appendToBlob(fn, data, appendToBuffer) {
-  let appendBlobCLient = null;
+let updatingBlockBlob = 0;
+
+async function updateBlockBlob(fn, t, blobClient) {
+  if(updatingBlockBlob > 1) {
+    console.log("skipping block blob update," + updatingBlockBlock + " updates pending");
+    return;
+  }
+  updatingBlockBlob++;
+  while(updatingBlockBlob > 1){
+    await sleep(100);
+  }
+
+  let blockBlobClient = await containerClient.getBlockBlobClient(fn.substring(0,fn.indexOf("."))+"_bb.csv");
+  console.log("block block update " + t + " starting dest = " + blockBlobClient.url + ", src = " + blobClient.url);
   try {
-    appendBlobClient = await containerClient.getAppendBlobClient(fn);
-    let ciner = await appendBlobClient.createIfNotExists();
+    await blockBlobClient.syncUploadFromURL(blobClient.url);
+    console.log("block blob update from " + t + " done");
+  }
+  catch(e) {
+    console.error("block blob update failed: ",e);
+    console.log(e);
+  }
+  updatingBlockBlob--;
+}
+
+let bands = ["A","B","C","Z","6.3Hz","8Hz","10Hz","12.5Hz","16Hz","20Hz","25Hz","31.5Hz","40Hz","50Hz","63Hz","80Hz","100Hz","125Hz","160Hz","200Hz","250Hz","315Hz","400Hz","500Hz","630Hz","800Hz","1kHz","1.25kHz","1.6kHz","2kHz","2.5kHz","3.15kHz","4kHz","5kHz","6.3kHz","8kHz","10kHz","12.5kHz","16kHz","20kHz"];
+let header = "IntervalEnd\tRespTime\t";
+for(let i = 0; i < bands.length;i++) {
+  header += "Leq"+bands[i]+"\t";
+}
+for(let i = 0; i < bands.length;i++) {
+  header += "Leq"+bands[i]+"_a300\t";
+}
+for(let i = 0; i < bands.length;i++) {
+  header += "Leq"+bands[i]+"_a3600\t";
+}
+for(let i = 0; i < bands.length;i++) {
+  header += "Leq"+bands[i]+"_attn\t";
+}
+
+
+async function appendToBlob(fn, data, appendToBuffer) {
+  let blobCLient = null;
+  try {
+    blobClient = await containerClient.getAppendBlobClient(fn);
+    let ciner = await blobClient.createIfNotExists();
     if(ciner.succeeded) {
-      data = "IntervalEnd\tRespTime\tLeqA\tLeqB\tLeqC\tLeqZ\tLeq6.3Hz\tLeq8Hz\tLeq10Hz\tLeq12.5Hz\tLeq16Hz\tLeq20Hz\tLeq25Hz\tLeq31.5Hz\tLeq40Hz\tLeq50Hz\tLeq63Hz\tLeq80Hz\tLeq100Hz\tLeq125Hz\tLeq160Hz\tLeq200Hz\tLeq250Hz\tLeq315Hz\tLeq400Hz\tLeq500Hz\tLeq630Hz\tLeq800Hz\tLeq1kHz\tLeq1.25kHz\tLeq1.6kHz\tLeq2kHz\tLeq2.5kHz\tLeq3.15kHz\tLeq4kHz\tLeq5kHz\tLeq6.3kHz\tLeq8kHz\tLeq10kHz\tLeq12.5kHz\tLeq16kHz\tLeq20kHz\r\n"+data;
+      data = header + "\r\n"+data;
     }
-    await appendBlobClient.appendBlock(data, data.length);
+    await blobClient.appendBlock(data, data.length);
     console.log("appended " + data + " to blob");
+    
+    /*    
+    let lineTime = data.substring(0,19);
+    console.log("lineTime=" + lineTime);
+    if(lineTime.substring(17,19) == "00"){
+      console.log("appendLineTime is full minute, updating block blob");
+      updateBlockBlob(fn, new Date(),blobClient);
+    }
+    */
     return true;
   }
   catch(e) {
@@ -483,29 +563,147 @@ async function appendToBlob(fn, data, appendToBuffer) {
 }
 
 async function handleMeasurementResponse(respTime, dataStr) {
-  let vArr = [new Date(), 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]; 
+  let vArr = [new Date(),0]; // time and filter setting 
+  for(let i = 0; i < bands.length;i++) {vArr.push(0.0);}
   // add to internal buffer
-//  while(measBuffer.currentSize > 0 && respTime.getTime()-measBuffer.topTime.getTime() > 1000) {
-//    console.log("internal buffer topTime " + measBuffer.topTime + " is > 1s before respTime " + respTime);
-//    vArr[0] = new Date(measBuffer.topTime.getTime()+1000);
-//    measBuffer.push(vArr); // add an all zero record to fill the gap
-//    pushTopDataRowToCloud(false);
-//  }
-  dataStr = "0,"+dataStr;
+  while(measBuffer.currentSize > 0 && respTime.getTime()-measBuffer.topTime.getTime() > 1000) {
+    console.log("internal buffer topTime " + measBuffer.topTime + " is > 1s before respTime " + respTime);
+    vArr[0] = new Date(measBuffer.topTime.getTime()+1000);
+    measBuffer.push(vArr); // add an all zero record to fill the gap
+    pushTopDataRowToCloud(false);
+  }
+  console.log("dataStr = '" + dataStr + "'");
+  dataStr = "0,"+dataStr; // PCE430 data string starts with filter setting, then one entry per band
   vArr = dataStr.split(",").map((x)=> {return parseFloat(x);});
   vArr[0] = respTime;
+  if(vArr.length > bands.length+2 && vArr[vArr.length-1] == 0) {
+    vArr.pop(); // pop a trailing zero
+  }
   measBuffer.push(vArr);
   pushTopDataRowToCloud(true);
+
+  // now derive attenuation 
+  updateAttenuation();
+}
+
+let updAttn = false;
+let attnInfo = {};
+for(let i = 0; i < bands.length;i++) {
+  attnInfo[bands[i]] = {lastUpdate:null,level:0.0,v5m:null,v1h:null};
+}
+async function updateAttenuation() {
+  if(updAttn) { console.log("update attn in progress, skipping");} // prevent multiple entry
+  updAttn = true;
+  let base = JSON.parse(JSON.stringify(measBuffer.buf[measBuffer.idx])); // deep copy
+  for(let i = 0; i < bands.length; i++) {
+    let bandConfig = remoteConfig.bandConfig[bands[i]];
+    if(!bandConfig) continue;
+    // is the 5m value over the limit
+    let ai = attnInfo[bands[i]];
+    let oldLevel = ai.level;
+    if(base["leq_5m"][bands[i]] > bandConfig.limit5m) {
+      // has it been attenuated before?
+      if(ai.lastUpdate) {
+        if(new Date().getTime() - ai.lastUpdate.getTime() < bandConfig.minIncDelay) {
+          continue; // do nothing yet, wait for delay to elapse
+	}
+	else {
+	  if(base["leq_5m"][bands[i]] > ai.v5m) { // it has continued to rise, attenuation not enough
+	    console.log("increasing attn for " + bands[i] + " 5m has risen from " + ai.v5m + " at " + ai.lastUpdate + " to " + base["leq_5m"][bands[i]] + " now.");
+	    ai.lastUpdate = new Date();
+	    ai.v5m = base["leq_5m"][bands[i]];
+	    ai.level = bandConfig.limit5m-base["leq_5m"][bands[i]];
+	  }
+	  else {// 5m is dropping, no need to action
+            ;
+	  }
+	}
+      }
+      else {
+        ai.lastUpdate = new Date();
+	ai.level = bandConfig.limit5m-base["leq_5m"][bands[i]];
+	ai.v5m = base["leq_5m"][bands[i]];
+      }
+    }
+    else { // level is below limit, we could ease off any attenuation
+      if(ai.lastUpdate && (new Date().getTime()-ai.lastUpdate.getTime()) > bandConfig.minDecDelay && ai.level < 0) {
+        ai.level = ai.level+1;
+        if(ai.level > 0)ai.level = 0;
+	ai.v5m = base["leq_5m"][bands[i]];
+	ai.lastUpdate = new Date();
+	console.log("reducing attn on band " + bands[i] + ": " + ai.level);
+      }
+    }
+    if(oldLevel != ai.level) {
+      console.log("attn of " + bands[i] + " changed from " + oldLevel + " to " + ai.level);
+      await updateEQ(bands[i], ai.level);
+    }
+  } // end for-loop over all bands
+  updAttn = false;
+}
+
+async function updateEQ(band) {
+  return;
+}
+
+
+let timeSyncInterval = null;
+
+async function updateConfig() {
+  try {
+    await updateDeviceClock();
+  }
+  catch(e) {
+    console.log("error updating device clock on update cycle:",e);
+    console.error(e);
+    process.exit(1);
+  }
+  try {
+    let data = await download("remoteConfig.json");
+    remoteConfig = JSON.parse(data.toString());
+    console.log("updated config from remote: " + data.toString());
+  }
+  catch(e) {
+    console.error(e);
+    console.log("error updating remoteConfig: ", e);
+    process.exit(1);
+  }
+}
+
+async function download(fn) {
+  let blobClient = await containerClient.getBlobClient(fn);
+  console.log("starting to download " + fn);
+  let startTime = new Date();
+  let res = await blobClient.download();
+  let data = await streamToBuffer(res.readableStreamBody);
+  let endTime = new Date();
+  console.log("blob downloaded, " + data.length + " bytes, duration " + (endTime.getTime()-startTime.getTime())/1000 + " s");
+  return data;
+}
+
+async function streamToBuffer(readableStream) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    readableStream.on("data", (data) => {
+      chunks.push(data instanceof Buffer ? data : Buffer.from(data));
+    });
+    readableStream.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+    readableStream.on("error", reject);
+  });
 }
 
 async function startup() {
   await discoverDevice();
 
-  await updateDeviceClock();
-  
   await initBuffer();
 
   await initBlobClient();
+
+  await updateConfig();
+  setInterval(updateConfig, 1000*3600);
+
 
   await startMeasurement();
 }
