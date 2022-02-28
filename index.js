@@ -419,7 +419,10 @@ function getCloudFileNameForEndTime(time) {
 
 let syncing = 0;
 async function syncToCloud(){
-  if(syncing) return;
+  if(syncing) {
+    console.log("sync to cloud in progress, skipping re-entry");
+    return;
+  }
   syncing = 1;
   /*let bufferFiles = await new Promise((resolve,reject)=> {
     fs.readdir("buffer", (err,files) => {
@@ -467,7 +470,10 @@ async function syncToCloud(){
       syncBuf.shift();
       lc++;
     }
-    else break;
+    else {
+      console.log("append to blob failed.");
+      break;
+    }
   }
   console.log("endSyncToCloud, lines synced: " + lc + " out of " + totalLines);
 
@@ -555,8 +561,14 @@ async function appendToBlob(fn, data, appendToBuffer) {
   catch(e) {
     console.error("Failed to append to blob " + fn + ":",e);
     if(appendToBuffer) {
-      fs.appendFileSync(bufferFile, data);
-      console.log("added to local buffer");
+      try { 
+	fs.appendFileSync(bufferFile, data);
+        console.log("added to local buffer");
+      }
+      catch(er) {
+        console.log("failed to append to local buffer: ", er);
+        console.error(er);
+      }
     }
     return false;
   }
@@ -650,7 +662,7 @@ async function updateEQ(band) {
 let timeSyncInterval = null;
 
 async function updateConfig() {
-  try {
+  /*try {
     await updateDeviceClock();
   }
   catch(e) {
@@ -658,6 +670,7 @@ async function updateConfig() {
     console.error(e);
     process.exit(1);
   }
+  */
   try {
     let data = await download("remoteConfig.json");
     remoteConfig = JSON.parse(data.toString());
