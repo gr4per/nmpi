@@ -1,0 +1,4 @@
+{"bandConfig":{"A":{"limit1h":50.0,"limit5m":51.0,"minIncDelay":10000,"minDecDelay":60000},"25Hz":{"limit1h":63.0,"limit5m":64.0,"minIncDelay":10000,"minDecDelay":60000},
+"31.5Hz":{"limit1h":55.5,"limit5m":56.5,"minIncDelay":10000,"minDecDelay":60000},"40Hz":{"limit1h":48.0,"limit5m":49.0,"minIncDelay":10000,"minDecDelay":60000},
+"50Hz":{"limit1h":40.5,"limit5m":41.5,"minIncDelay":10000,"minDecDelay":60000},"63Hz":{"limit1h":33.5,"limit5m":34.5,"minIncDelay":10000,"minDecDelay":60000},
+"80Hz":{"limit1h":33.0,"limit5m":34.0,"minIncDelay":10000,"minDecDelay":60000},"100Hz":{"limit1h":33.5,"limit5m":34.5,"minIncDelay":10000,"minDecDelay":60000}}}

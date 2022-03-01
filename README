@@ -57,6 +57,8 @@ sudo apt-get install setserial
 sudo apt install net-tools
 sudo apt install python3.8
 
+DefaultEndpointsProtocol=https;AccountName=nmpi;AccountKey=/E26CuQzmgfuTQakwTjsWXaV0oGJkxEVNKIceAt9qvW03m0D3HCghf02TU3FjlBF0NSiN8ZKVcWQPAQBY/iJzw==;EndpointSuffix=core.windows.net
+
 ## local git 
 eval $(ssh-agent -s)
 ssh-add ~/.ssh/github_gr4per_rsa

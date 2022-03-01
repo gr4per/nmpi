@@ -12,33 +12,64 @@ and consume it
 -Add timeout to look for new code on storage account and download then stop nodejs and start new service
 
 3. Robustness
--Define stragey to deal with dropped measurement values
--Make sure when Raspi powers up, nmpi is started
+DONE -Define strategy to deal with dropped measurement values -> replace with zeros
+-Make sure when Raspi powers up, nmpi is started https://superuser.com/questions/685471/how-can-i-run-a-command-after-boot
 -Make sure when nmpi starts it will pre-fill buffer with current values from storage account if available
 -Make sure when nmpi starts, it will set time on PCE 430, set measurement config to expected values and start measurement if not running
--Make sure if nmpi misses a tick, it will set fill value (empty?) to buffer
+DONE -Make sure if nmpi misses a tick, it will set fill value (empty?) to buffer -> zero padding
+- STOP Measurement once a day and set time on PCE 430, then restart
+
 
 4. Back end
--create state diagram for program flow
--Add 1 hour cyclic buffer to nmpi
--On tick, store new value to buffer, also add energy equivalent and update floating 1 hour window energy and 5 min window energy, add 5 minute Leq values, add 1 hour Leq values
+DONE -create state diagram for program flow
+DONE -Add 1 hour cyclic buffer to nmpi 
+DONE -On tick, store new value to buffer, also add energy equivalent and update floating 1 hour window energy and 5 min window energy, add 5 minute Leq values, add 1 hour Leq values
 DONE -Check whether Latz was giving model value for LAeq ( yes -> 85.3 dBA, see page 12, table 5.5)
--On tick, update new data to storage account (create or append)
--Manage 1 file per hour on storage with 3600 values
--add storage account creds for uploading data
--pick blob type for append into block
--on top of the hour, switch file name
--time service synchronization
+DONE -On tick, update new data to storage account (create or append)
+DONE -Manage 1 file per hour on storage with 3600 values
+DONE -add storage account creds for uploading data
+DONE -pick blob type for append into block
+DONE -on top of the hour, switch file name
+DONE -time service synchronization - timedatectl shows timesyncd is active
+-add aggregation values for selected bands to cloud store (to be able to compare with front end aggregation,i.e. visual debugging)
+-calculate attenuation value per band based on SPL history (5m/1hr aggregate) and define threshold
+-buy soundcraft EQ and add control mechanism
+-configure raspi to use e5577 via usb as router
+-configure raspi to use MNNMPI network and buffer data while network down
+-add attenuation value per band to cloud store
+
 
 5. Front end
--create traffic light view, large, one row per interesting value (LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), color code 
--create rolling graph view, one per interesting value(LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), also current gain reduction per band
+-add configuration for thresholds per band on storage account and read on start of the client or window init
+-add hamburger menu for window config
+--allow to set date for window end, special case "NOW" and allow to set window duration (1hr, 4hrs, 12hrs)
 -create control to review old data on graph view (from-to interval, if to is open, then roll)
--when initializing view/interval, pull data from storage account
--when in rolling mode, continuously load any new lines of current file
+--allow to pick which graphs to display (only those with defined threshold)
+-create traffic light view, large, one row per interesting value (LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), color code 
+-display current SPL value as overlay to chart window, make background in traffic light color: yellow 5m value over limit, orange 5m value 3db over limit, red 5m value 3db over limit and 1hr value within 3db under limit, black 1hr value over limit
+-create rolling graph view, one per interesting value(LAeq, 40Hz, 50Hz 63Hz, 80Hz, 100Hz), also current gain reduction per band
+
+DONE -when initializing view/interval, pull data from storage account
+DONE -when in rolling mode, continuously load any new lines of current file
 -on top of the hour, switch file name
 -adjust to viewport of device
 
 6. General 
 Create algorithm to extrapolate SPL reserve for 1 hour window based on data so far
+
+------------------
+Bugs
+Failed to append to blob 2022/02/27/10.csv: FetchError: request to https://nmpi.blob.core.windows.net/nmpi-test/2022%2F02%2F27%2F10.csv failed, reason: getaddrinfo EAI_AGAIN nmpi.blob.core.windows.net
+    at ClientRequest.<anonymous> (/home/ubuntu/nmpi/node_modules/node-fetch/lib/index.js:1491:11)
+    at ClientRequest.emit (node:events:520:28)
+    at TLSSocket.socketErrorListener (node:_http_client:442:9)
+    at TLSSocket.emit (node:events:520:28)
+    at emitErrorNT (node:internal/streams/destroy:157:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:122:3)
+    at processTicksAndRejections (node:internal/process/task_queues:83:21) {
+  type: 'system',
+  errno: 'EAI_AGAIN',
+  code: 'EAI_AGAIN'
+}
+
 
