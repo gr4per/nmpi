@@ -527,7 +527,7 @@ async function initBuffer() {
 
 /**
  *
- *
+ */
 async function initBlobClient() {
   let connStr = config.storageConnectionString;
   if(!connStr || connStr.length == 0) throw "No connection string in config!";
@@ -853,7 +853,7 @@ async function startup() {
 
   await initBuffer();
 
-  //await initBlobClient();
+  await initBlobClient();
 
   await updateConfig();
   setInterval(updateConfig, 1000*3600);
