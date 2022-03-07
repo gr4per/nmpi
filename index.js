@@ -1,4 +1,5 @@
 const fs = require('fs');
+const {WebSocket} = require('ws');
 const {SerialPort} = require('serialport')
 const {ReadlineParser} = require('@serialport/parser-readline');
 const {DelimiterParser} = require('@serialport/parser-delimiter')
@@ -11,6 +12,7 @@ const config = require("./config.json");
 let ID = 1;
 let deviceState = 0;
 
+let state = "new";
 let blobServiceClient;
 let containerClient;
 let lastTimeSync = null;
@@ -30,6 +32,7 @@ console.log = function(){
 
 let uplink = {
   joinTime:null, // Date object
+  nmdId:config.containerName,
   nmdClient:null,
   nmdClientId:null,
   https:false,
@@ -39,32 +42,47 @@ let uplink = {
   apiToken:null,
   lastPing:null,
   successfulJoin:false,
-  status:"offline"
+  status:"offline",
+  retry:0
 }
 uplink.apiToken = config.nmdToken;
 
 uplink.interval = setInterval(async ()=>{
   if(state != "running") return;
   if(uplink.nmdClient) { 
-    if( (new Date().getTime() - this.lastPing.getTime()) > 3000) {
-      console.log("" + new Date() + ": found stale server connection not pinged since " + uplink.lastPing + ", leaving, then resetting nmdClient and scheduling reconnect...");
-      sendRemoteCommand({command:"leave",params:[false]});           
-      uplink.nmdClient.close();
+    if( uplink.status == "offline" ||(new Date().getTime() - uplink.lastPing.getTime()) > 3000) {
+      console.log("" + new Date() + ": found stale/broken server connection not pinged since " + uplink.lastPing + ", leaving, then resetting nmdClient and scheduling reconnect...");
+      try {
+        sendRemoteCommand({command:"leave",params:[false]});           
+      }
+      catch(e) {
+        console.log("not able to send leave command: " + e);
+      }
+      try {
+        uplink.nmdClient.close();
+      }
+      catch(e) {
+        console.log("failed to close socket: " + e);
+      }
       uplink.nmdClient = null;
-      setTimeout(joinNMS.bind(this, this.state.playerId, this.state.gameId, 0),1000);
+      uplink.successfulJoin = false;
+      setTimeout(joinNMS,1000);
       return;
     }
     else {
-      //log("" + new Date() + ": sending ping to server");
-      this.sendRemoteCommand({command:"clientPing",params:[]});
+      console.log("" + new Date() + ": sending ping to server");
+      sendRemoteCommand({command:"clientPing",params:[]});
     }
   }
   else {
     uplink.nmdClient = null;
     if(uplink.apiToken) {
       clearTimeout();
-      log("no nmdClient, setting time out to re connect to NMS with nmdId " + this.state.nmdId);
+      console.log("no nmdClient, setting time out to re connect to NMS with nmdId " + uplink.nmdId);
       setTimeout(joinNMS,1000);
+    }
+    else {
+      console.log("cannot connect to NMS: no API token");
     }
   }
 },2000);
@@ -84,7 +102,7 @@ function sendRemoteCommand(cmdJson) {
 }
 
 async function joinNMS() {
-  log("joinNMS called, retry = " + uplink.retry++);
+  console.log("joinNMS called, retry = " + uplink.retry++);
   if(!uplink.nmdId) {
     console.log("need nmdId to join nmd.");
     return;
@@ -94,11 +112,11 @@ async function joinNMS() {
     return;
   }
   uplink.joinTime = new Date();
-  console.log("trying to join nmd " + nmdId + "...");
+  console.log("trying to join nmd " + uplink.nmdId + "...");
   let successfulJoin = false;
-  console.log("join nmd called, nmdId = " + nmdId);
+  console.log("join nmd called, nmdId = " + uplink.nmdId);
   try {
-    nmdClient = new WebSocket('ws'+(uplink.https?"s":"")+'://'+uplink.serverAddress+':'+uplink.port+'/api/nmds/' + nmdId + '/join?token=' + uplink.apiToken + '&mode=source');
+    uplink.nmdClient = new WebSocket('ws'+(uplink.https?"s":"")+'://'+uplink.serverAddress+':'+uplink.port+'/api/nmds/' + uplink.nmdId + '/join?token=' + uplink.apiToken + '&mode=source');
   }
   catch(err) {
     console.error(err);
@@ -143,6 +161,13 @@ async function joinNMS() {
         case "stream":
           console.log("received stream signal from server to start syncing buffer from " + messageObj.params[0]);
           uplink.serverSyncFromTime = messageObj.params[0];
+          if(uplink.serverSyncFromTime == null) {
+            // server sending null means all existing buffer rows to be synced, this is max 1 day
+            uplink.serverSyncFromTime = new Date(new Date().getTime() -24*3600*1000);
+          }
+          else {
+            uplink.serverSyncFromTime = new Date(uplink.serverSyncFromTime);
+          }
           uplink.successfulJoin = true;
           break;
         default:
@@ -220,8 +245,8 @@ class MeasurementBuffer {
     for(let l of Object.keys(this.buf[index]["leq_s"])) {
       if(isNaN(this.buf[index]["leq_s"][l])) {
         console.log("cannot set valueArr " + JSON.stringify(valueArr) + ": value '" + l + "'=" + this.buf[index]["leq_s"][l] + " is not a number. leq_s["+index+"] = " + JSON.stringify(this.buf[index]["leq_s"]));
-  console.error(new Error("this didnt work out as expected"))
-  process.exit(1);
+        console.error(new Error("this didnt work out as expected"))
+        process.exit(1);
       }
       this.buf[index].ee[l] = this.getSPLEnergyEquivalent(this.buf[index]["leq_s"][l]);
     }
@@ -280,7 +305,7 @@ class MeasurementBuffer {
    */
   push(valueArr) {
     if(valueArr.length != bands.length+2) {
-      console.log("cannot push " + JSON.stringify(valueArr) + ", incorrect size ");
+      console.log("cannot push " + JSON.stringify(valueArr) + ", incorrect size: " + valueArr + ", expected " + (bands.length+2));
       console.error(new Error("oh oh"));
       process.exit(1);
     }
@@ -293,6 +318,27 @@ class MeasurementBuffer {
     }
 
     let prevIdx = this.idx;
+    // compare prev data with current
+    if(this.currentSize > 0) {
+      let identical = true;
+      for(let i = 2; i < bands.length+2;i++) {
+        if(valueArr[i] != this.buf[this.idx]){
+          identical = false;
+          break;
+        }
+      }
+      if(identical) {
+        console.error("duplicate value " + JSON.stringify(valueArr));
+        // restart measurement
+        try {
+          restartMeasurement();
+        }
+        catch(e) {
+          console.error("unable to stop /restart measurement: ", e);
+        }
+
+      }
+    }
     this.idx++; // point to new top frame
     if(this.idx > this.size-1) this.idx = 0;
     this.set(this.idx, valueArr);
@@ -362,7 +408,7 @@ parserUSB.on('data', (data) => {
     rbc ^= data[i];
   }
   if(bcc != 0 && bcc != rbc) {
-    console.err("response checksum " + rbc + " not matching received bcc " + bcc);
+    console.error("response checksum " + rbc + " not matching received bcc " + bcc);
     if(responsePromise)responsePromise.reject("checksum mismatch");
     return;
   }
@@ -452,14 +498,13 @@ async function discoverDevice() {
       let mState = parseInt(res);
       if(mState == 1) {
         console.log("Measurement is running, stopping...");
-  try {
+        try {
           res = await serialCommand("STA","0");
-    console.log("stopped");
-  }
-  catch(e) {
-    console.error("Stopping measurement failed: ", e);
-  }
-
+          console.log("any running measurement now stopped");
+        }
+        catch(e) {
+          console.error("Stopping measurement failed: ", e);
+        }
       }
       deviceState = 1;
     }
@@ -540,6 +585,15 @@ async function initBlobClient() {
 /**
  *
  */
+async function restartMeasurement() {
+  let res = await serialCommand("STA","0");
+  console.log("any running measurement now stopped");
+  await startMeasurement();
+}
+
+/**
+ *
+ */
 async function startMeasurement() {
   await serialCommand("STA","1");
   console.log("Measurement started");
@@ -570,6 +624,7 @@ let syncing = 0;
 async function syncToCloud(){
   if(uplink.status != "online") {
     console.log("syncToCloud: skip because status isnt online...");
+    return;
   }
   if(syncing) {
     console.log("sync to cloud in progress, skipping re-entry");
@@ -579,29 +634,31 @@ async function syncToCloud(){
   // first figure out how far back we have to go
   if(uplink.serverSyncFromTime) {
     console.log("skimming backupBuffer to re-sync all entries from " + uplink.serverSyncFromTime);
-    let c = 0;
-    while(backupBuffer.length > 0) {
-      let el = backupBuffer.pop();
+    let i = 0;
+    for(i = backupBuffer.length-1; i >= 0;i--) { 
+      let el = backupBuffer[i];
       let csvTime = getCsvTime(el);
       if(csvTime.getTime() > uplink.serverSyncFromTime.getTime()) {
-        syncBuf.unshift(el);
-        c++;
+        ;
       }
       else {
-        backupBuffer.push(el);
+        i++;
         break;
       }
     }
-    console.log("pushed " + c + " elements back to sync Buffer");
+    let transfer = backupBuffer.splice(i,backupBuffer.length-i);
+    syncBuf = transfer.concat(syncBuf);
+    
+    console.log("pushed " + (backupBuffer.length-i) + " elements back to sync Buffer");
     uplink.serverSyncFromTime = null;
   }
   let csvLine = null;
   let lc = 0;
   let totalLines = syncBuf.length;
-  let pos = 0;
-  let data = Buffer.from("");
+  let data = "";
   for(let i = 0; i < syncBuf.length; i++) {
-    pos += data.write(syncBuf[i], pos);
+    data += syncBuf[i];
+    //console.log("added syncBuf[" + i + "] of " + syncBuf.length + ", data now " + data.toString());
     lc++;
   }
   try {
@@ -611,14 +668,15 @@ async function syncToCloud(){
   }
   catch(e) {
     console.error("failed to write syncBuf to NMS: ", e);
-    
+    uplink.status = "offline";
+    lc = 0;
   }
   console.log("endSyncToCloud, lines synced: " + lc + " out of " + totalLines);
 
   syncing = 0;
 }
 
-const backupBuffer = [];
+let backupBuffer = [];
 function addToBackupBuffer(el) {
   backupBuffer.push(el);
   if(backupBuffer.length > 86400) {
@@ -626,7 +684,7 @@ function addToBackupBuffer(el) {
   }
 }
 
-const syncBuf = [];
+let syncBuf = [];
 
 async function pushTopDataRowToCloud(flush){  
   // convert top row in internal buffer to csv line
@@ -729,8 +787,8 @@ async function handleMeasurementResponse(respTime, dataStr) {
   dataStr = "0,"+dataStr; // PCE430 data string starts with filter setting, then one entry per band
   vArr = dataStr.split(",").map((x)=> {return parseFloat(x);});
   vArr[0] = respTime;
-  if(vArr.length > bands.length+2 && vArr[vArr.length-1] == 0) {
-    vArr.pop(); // pop a trailing zero
+  if(vArr.length > bands.length+2) {
+    vArr.pop(); // pop a trailing integer
   }
   measBuffer.push(vArr);
   pushTopDataRowToCloud(true);
