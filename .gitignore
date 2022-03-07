@@ -6,3 +6,4 @@ buffer/
 *.wav
 log.txt
 .index.js.swp
+remoteConfig.json
