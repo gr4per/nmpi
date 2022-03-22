@@ -4,6 +4,7 @@ const {SerialPort} = require('serialport')
 const {ReadlineParser} = require('@serialport/parser-readline');
 const {DelimiterParser} = require('@serialport/parser-delimiter')
 const {BlobServiceClient} = require('@azure/storage-blob');
+const {Dsp206} = require('./dsp206.js');
 
 const serialUSB = new SerialPort({path:"/dev/ttyUSB0", baudRate: 9600});
 const serialAMA = new SerialPort({path:"/dev/ttyAMA0", baudRate: 9600});
@@ -35,9 +36,12 @@ let uplink = {
   nmdId:config.containerName,
   nmdClient:null,
   nmdClientId:null,
-  https:false,
-  serverAddress:"192.168.188.20",
-  port:3000,
+  //https:false,
+  //serverAddress:"192.168.188.20",
+  //port:3000,
+  serverAddress:"gr4per-nms.azurewebsites.net",
+  port:443,
+  https:true,
   serverVersion:null,
   apiToken:null,
   lastPing:null,
@@ -170,6 +174,11 @@ async function joinNMS() {
           }
           uplink.successfulJoin = true;
           break;
+        case "dropBefore":
+          console.log("received dropBefore " + messageObj.params[0] +  " signal from server");
+          let serverCommitTime = messageObj.params[0];
+          dropBackupBufferBefore(new Date(serverCommitTime));
+          break;
         default:
           console.error("command not implemented");
       }
@@ -197,7 +206,8 @@ class MeasurementBuffer {
     this.buf = new Array(this.size);
     this.idx = this.size-1; // pointing to top, i.e. last written record
     this.startIdx = this.idx;
-    this.startTime = new Date(new Date().getTime()/1000*1000); // put on full second, this is the integration END time of the interval covered by the bin
+    this.startTime = new Date();
+    this.startTime.setMilliseconds(0);    // put on full second, this is the integration END time of the interval covered by the bin
     this.topTime = this.startTime; // again, this is the END time of the interval, i.e. bin 13:26:47 covers integration from 13:26:46-13:26:47
   }
 
@@ -236,6 +246,11 @@ class MeasurementBuffer {
     return Math.pow(10,spl/10.0);
   }
 
+  /**
+   * Expects array with responseTime (Date) at pos 0
+   * filter profile (int) at pos 1
+   * and then for each band one number with Leq value
+   */
   set(index, valueArr) {
     valueArr = valueArr.slice();
     let t = this.getTime(index);
@@ -259,7 +274,7 @@ class MeasurementBuffer {
       dt = (this.topTime.getTime()-this.startTime.getTime());
     }
     let idx = this.idx;
-    let start5m = idx - dt/1000;
+    let start5m = idx - dt/1000+1;
     if(start5m < 0) start5m = this.size+start5m;
     console.log("5m start idx = " + start5m + ", time = " + this.getTime(start5m));
     this.aggregateWindow(start5m, "leq_5m");
@@ -285,8 +300,12 @@ class MeasurementBuffer {
       if(ni<0)i+=this.size; // ni can be negative and is counting up towards idx. i needs to be positive, so we map it to buf range
       //console.log("adding from " + i + " (ni=" + ni + "): ");// + JSON.stringify(this.buf[i],null,2));
       for(let l of Object.keys(target.ee)){
-  //console.log("i=" + i + " adding value with label " + l + " to target from row " + JSON.stringify(this.buf[i])); 
-  target[name][l] += this.buf[i]["ee"][l];
+        //console.log("i=" + i + " adding value with label " + l + " to target from row " + JSON.stringify(this.buf[i])); 
+        if(!this.buf[i]["ee"]) {
+          console.error("measurementBuffer[" + i + "] is not properly initialized: " + JSON.stringgify(this.buf[i]));
+          process.exit(1);
+        }
+        target[name][l] += this.buf[i]["ee"][l];
       }
       binCount++;
     }
@@ -309,20 +328,34 @@ class MeasurementBuffer {
       console.error(new Error("oh oh"));
       process.exit(1);
     }
+    let prevSize = this.currentSize;
+    let prevIdx = this.idx;
     if(this.currentSize == 0) { // on first push we set start time
-      this.topTime = new Date(new Date().getTime()/1000*1000); // put on full second
+      this.topTime = new Date(valueArr[0]); // this is response time, make sure we date it back as the result can only come after the second integral has fully elapsed
+      if(this.topTime.getMilliseconds() < 500) {
+        this.topTime = new Date(this.topTime.getTime()-1000);
+        console.log("Dating topTime back one second based on passed respTime " + valueArr[0].toISOString());
+      }
+      this.topTime.setMilliseconds(0);      // put on full second
       this.startTime = this.topTime;
+      console.log("push to empty measurement buffer, setting start time and top time to " + this.topTime);
     }
     else {
       this.topTime = new Date(this.topTime.getTime()+1000);
     }
 
-    let prevIdx = this.idx;
+
+    this.idx++; // point to new top frame
+    if(this.idx > this.size-1) this.idx = 0;
+    this.set(this.idx, valueArr);
+
     // compare prev data with current
-    if(this.currentSize > 0) {
+    if(prevSize > 0) {
       let identical = true;
-      for(let i = 2; i < bands.length+2;i++) {
-        if(valueArr[i] != this.buf[this.idx]){
+      let prevValue = this.buf[prevIdx];
+      let currentValue = this.buf[this.idx];
+      for(let k of Object.keys(prevValue.leq_s)) {
+        if((prevValue.leq_s[k] != currentValue.leq_s[k]) || currentValue.leq_s[k] == 0){ // exclude zero values as they can legally occurr as duplicates to fill buffer slots
           identical = false;
           break;
         }
@@ -336,12 +369,9 @@ class MeasurementBuffer {
         catch(e) {
           console.error("unable to stop /restart measurement: ", e);
         }
-
       }
     }
-    this.idx++; // point to new top frame
-    if(this.idx > this.size-1) this.idx = 0;
-    this.set(this.idx, valueArr);
+
     this.currentSize++;
     if(this.currentSize > this.size)this.currentSize = this.size;
     console.log("push to " + this.idx + " ready, size now " + this.currentSize + " bins");
@@ -448,39 +478,46 @@ function serialCommand(commandName) {
     return;
   }
   return new Promise( (resolve, reject) => {
-    setTimeout(()=> {reject("Device did not reply within 5s");},5000);
+    let timeout = setTimeout(()=> {
+      if(responsePromise && responsePromise.commandName == commandName) {
+        reject("Device did not reply within 5s to " + commandName + " command.");
+      }
+      else {
+        console.log("5s timer expired on command " + commandName + " but not matching responsePromise command " + responsePromise.commandName);
+      }
+    },5000);
     responsePromise = {resolve:resolve, reject:reject,commandName:commandName,start:new Date()};
     let payload = new Uint8Array(1024);
-  let payloadBytes = 0;
-  payload[payloadBytes++] = 0x2;
-  payload[payloadBytes++] = (ID&0xff); //commandName == "IDX" ? 0 : (ID&0xff);
-  payload[payloadBytes++] = "C".charCodeAt(0);
-  for(let i = 0; i < arguments.length; i++) {
-    if(i>1) payload[payloadBytes++] = " ".charCodeAt(0); // space between params
-    for(let j = 0; j < arguments[i].length; j++) {
-      let cc = arguments[i].charCodeAt(j);
-      if(cc > 255 || cc < 0) {
-        console.error("command arg '" + arguments[i] + "' has invalid character " + cc + " at position " + j);
-        return;
+    let payloadBytes = 0;
+    payload[payloadBytes++] = 0x2;
+    payload[payloadBytes++] = (ID&0xff); //commandName == "IDX" ? 0 : (ID&0xff);
+    payload[payloadBytes++] = "C".charCodeAt(0);
+    for(let i = 0; i < arguments.length; i++) {
+      if(i>1) payload[payloadBytes++] = " ".charCodeAt(0); // space between params
+      for(let j = 0; j < arguments[i].length; j++) {
+        let cc = arguments[i].charCodeAt(j);
+        if(cc > 255 || cc < 0) {
+          console.error("command arg '" + arguments[i] + "' has invalid character " + cc + " at position " + j);
+          return;
+        }
+        payload[payloadBytes++] = arguments[i].charCodeAt(j);
       }
-      payload[payloadBytes++] = arguments[i].charCodeAt(j);
     }
-  }
-  payload[payloadBytes++] = 0x3;
-  let bcc = 0;
-  for(let i = 0; i < payload.length; i++) {
-    bcc ^= payload[i];
-  }
-  payload[payloadBytes++] = bcc;
-  payload[payloadBytes++] = 0xd;
-  payload[payloadBytes++] = 0x0a;
-  console.log("writing " + payloadBytes + " data bytes to serial: ");
-  let strR = "";
-  for(let i = 0; i < payloadBytes; i++) {
-    console.log("byte " + i + " [0x" + payload[i].toString(16) + "]:" + String.fromCharCode(payload[i]));
-  }
-  //serialAMA.write(payload.subarray(0,payloadBytes));
-  serialUSB.write(payload.subarray(0,payloadBytes), () => {console.log("write done")});
+    payload[payloadBytes++] = 0x3;
+    let bcc = 0;
+    for(let i = 0; i < payload.length; i++) {
+      bcc ^= payload[i];
+    }
+    payload[payloadBytes++] = bcc;
+    payload[payloadBytes++] = 0xd;
+    payload[payloadBytes++] = 0x0a;
+    console.log("writing " + payloadBytes + " data bytes to serial: ");
+    let strR = "";
+    for(let i = 0; i < payloadBytes; i++) {
+      console.log("byte " + i + " [0x" + payload[i].toString(16) + "]:" + String.fromCharCode(payload[i]));
+    }
+    //serialAMA.write(payload.subarray(0,payloadBytes));
+    serialUSB.write(payload.subarray(0,payloadBytes), () => {console.log("write done")});
   });
 }
 
@@ -530,44 +567,126 @@ async function updateDeviceClock() {
 
 
 function getFileName(time) {
-  return "buffer/"+getCloudFileNameForEndTime(time);
+  return "buffer/"+getCloudFileNameForEndTime(time).replace(/\//g, "-");
 }
 
-async function applyCsvToBuffer(csv) {
+async function applyJsonLinesToBuffer(csv, start) {
+  // we need an empty value template in case the file is not complete we have to fill gaps with zeros
+  let ev = new Array(0);
+  ev.push(new Date());
+  ev.push(0); // filter value
+  for(let b of Object.values(bandLabelMap)) {
+    ev.push(0.0);
+  }
+
   let lines = csv.split("\r\n");
-  for(let i = 1; i < lines.length;i++) {
-    let cells = line.split("\t");
-    let idx = measBuffer.getIndex(new Date(cells[0]));
-    if(idx > -1) {
-      measBuffer.set(idx, cells.subarray(1,17));
+  console.log("going to process " + lines.length + " lines.");
+  for(let i = 0; i < lines.length;i++) {
+    let line = lines[i];
+    if(line.length < 30 || line.charCodeAt(0) == 0) continue;
+    console.log("applying line " + line.substring(0,33));
+    try {
+      line = JSON.parse(line);
     }
+    catch(e) {
+      console.error("error in buffer file, cannot parse json '" + line + "':",e);
+      let bytes = "";
+      for(let j = 0; j < line.length; j++) {
+        bytes+=" 0x"+line.charCodeAt(j);
+      }
+      console.log("bytes = " + bytes);
+      continue;
+    }
+    
+    let lineTime = new Date(line.time);
+    lineTime.setMilliseconds(0);
+    console.log("lineTime = " + lineTime);
+    if(start && lineTime.getTime() < start.getTime()) {
+      console.log("skipping line " + i + " at " + lineTime);
+      continue;
+    }
+    let nextIdx = measBuffer.idx+1;
+    while(nextIdx >= measBuffer.size) { nextIdx -= measBuffer.size; }
+    if(measBuffer.currentSize == 0) {
+      // insert on current position
+      console.log("measurement buffer empty, setting start time to first line ingested: " + lineTime);
+      measBuffer.topTime = measBuffer.startTime = lineTime.getMilliseconds() > 300 ? lineTime: new Date(lineTime.getTime()-1000); // put one second back because of jitter
+      measBuffer.topTime.setMilliseconds(0);
+      measBuffer.buf[nextIdx] = line;
+    }
+    else {
+      let prevEntry = measBuffer.buf[measBuffer.idx];
+      let insertTime = new Date(measBuffer.topTime.getTime()+1000);
+      while(lineTime.getTime() > insertTime.getTime()) {
+        console.error("reading buffer, next insert time " + insertTime.toISOString() + ", mismatching lineTime is " + lineTime.toISOString() + ", adding zero row");
+        measBuffer.push(ev);
+        nextIdx = measBuffer.idx+1;
+        while(nextIdx >= measBuffer.size) { nextIdx -= measBuffer.size; }
+        insertTime = new Date(measBuffer.topTime.getTime()+1000);
+      }
+      measBuffer.buf[nextIdx] = line;
+    }
+    measBuffer.topTime = lineTime;
+    measBuffer.topTime.setMilliseconds(0);
+    measBuffer.currentSize = Math.min(measBuffer.currentSize+1, measBuffer.size);
+    measBuffer.idx = nextIdx;
   }
 }
 
 async function initBuffer() {
   measBuffer = new MeasurementBuffer(3600);
   measBuffer.init();
+  let now = new Date();
+  let start = new Date(now.getTime());
+  start.setMinutes(0);
+  start.setSeconds(0);
+  start.setMilliseconds(0);
+  let ev = new Array(0);
+  ev.push(new Date());
+  ev.push(0); // filter value
+  for(let b of Object.values(bandLabelMap)) {
+    ev.push(0.0);
+  }
 
-  // load current hour file
-  let fn = getFileName(measBuffer.startTime);
-  try {
-    let data = fs.readFileSync(fn);
-    applyCsvToBuffer(data);
-  }
-  catch(e) {
-    console.log("no local measurement file for current hour found: " + fn);
-  }
+
   // load prev hour file
-  fn = getFileName(new Date(measBuffer.startTime.getTime()-3600000)); // one hour back
+  let prevHourStart = new Date(now.getTime()-3600000);
+  let fn = getFileName(prevHourStart); // one hour back
   try {
-    let data = fs.readFileSync(fn);
-    applyCsvToBuffer(data);
+    console.log("trying to load previous hour bufferFile " + fn);
+    let data = fs.readFileSync(fn).toString();
+    applyJsonLinesToBuffer(data, start);
   }
   catch(e) {
     console.log("no local measurement file for previous hour found: " + fn);
   }
 
+  let currentHourStart = new Date(prevHourStart.getTime()+3600*1000);
+  while(measBuffer.topTime.getTime() < currentHourStart.getTime()-1000) {
+    measBuffer.push(ev);
+    console.log("pushed empty row to measBuffer to fill prev hour, top now " + measBuffer.topTime);
+  }
 
+  // load current hour file
+  fn = getFileName(start);
+  try {
+    console.log("trying to load current hour bufferFile " + fn);
+    let data = fs.readFileSync(fn).toString();
+    applyJsonLinesToBuffer(data);
+  }
+  catch(e) {
+    console.log("no local measurement file for current hour found: " + fn);
+  }
+  console.log("buffer after load = (currentSize ="  + measBuffer.currentSize + ")");
+  let earliestIdx = measBuffer.idx-measBuffer.currentSize;
+  if(earliestIdx < 0)earliestIdx+= measBuffer.size;
+  console.log("startIdx " + earliestIdx + ", time " + measBuffer.getTime(earliestIdx) + " dataTime " + measBuffer.buf[earliestIdx].time);
+  console.log("topIdx " + measBuffer.idx + ", time " + measBuffer.topTime + ", getTime() = " + measBuffer.getTime(measBuffer.idx) + " dataTime " + measBuffer.buf[measBuffer.idx].time);
+  
+  while(new Date().getTime() - measBuffer.topTime.getTime() > 2000) {
+    measBuffer.push(ev);
+    console.log("pushed empty row to measBuffer, top now " + measBuffer.topTime);
+  }
 }
 
 /**
@@ -585,19 +704,54 @@ async function initBlobClient() {
 /**
  *
  */
+async function stopMeasurement() {
+  let res = null;
+  try {
+    res = await serialCommand("STA","0");
+    console.log("any running measurement now stopped");
+  }
+  catch(e) {
+    console.error("failed to stop measurement: ", e);
+    return false;
+  }
+  return true;
+}
+
+/**
+ *
+ */
 async function restartMeasurement() {
-  let res = await serialCommand("STA","0");
-  console.log("any running measurement now stopped");
-  await startMeasurement();
+  if(await serialCommand("STA","0")) {
+    console.log("measurement now stopped");
+  }
+  else {
+    console.log("stop failed: measurement wasn't running");
+  }
+  try {
+    res = await startMeasurement();
+  }
+  catch(e) {
+    console.error("failed to restart measurement: ", e);
+  }
 }
 
 /**
  *
  */
 async function startMeasurement() {
-  await serialCommand("STA","1");
-  console.log("Measurement started");
-  await serialCommand("DTT","2","?");
+  try {
+    await serialCommand("STA","1");
+    console.log("Measurement started");
+  }
+  catch(e) {
+    console.error("failed to start measurement: ", e);
+  }
+  try {
+    await serialCommand("DTT","2","?");
+  }
+  catch(e) {
+    console.error("failed to start dtt push: ", e);
+  }
 //  await sleep(1000);
 //  setInterval(() => {
 //    serialCommand("DTT","1","?");
@@ -620,6 +774,34 @@ function getCsvTime(csvLine) {
   return new Date(csvTime);
 }
 
+/**
+ * skims the backup buffer in reverse order to find 
+ * the index of the first entry newer than date
+ */
+function getBackupBufferIndex(date) {
+  let i = 0;
+  for(i = backupBuffer.length-1; i >= 0;i--) { 
+    let el = backupBuffer[i];
+    let csvTime = getCsvTime(el);
+    if(csvTime.getTime() > uplink.serverSyncFromTime.getTime()) {
+      ;
+    }
+    else {
+      i++;
+      break;
+    }
+  }
+  return i;
+}
+
+function dropBackupBufferBefore(date) {
+  let i = getBackupBufferIndex(date);
+  if(i>0) {
+    console.log("removing first " + i + " elements of backupBuffer, older than " + date);
+    backupBuffer.splice(0, i);
+  }
+}
+
 let syncing = 0;
 async function syncToCloud(){
   if(uplink.status != "online") {
@@ -634,18 +816,7 @@ async function syncToCloud(){
   // first figure out how far back we have to go
   if(uplink.serverSyncFromTime) {
     console.log("skimming backupBuffer to re-sync all entries from " + uplink.serverSyncFromTime);
-    let i = 0;
-    for(i = backupBuffer.length-1; i >= 0;i--) { 
-      let el = backupBuffer[i];
-      let csvTime = getCsvTime(el);
-      if(csvTime.getTime() > uplink.serverSyncFromTime.getTime()) {
-        ;
-      }
-      else {
-        i++;
-        break;
-      }
-    }
+    let i = getBackupBufferIndex(uplink.serverSyncFromTime);
     let transfer = backupBuffer.splice(i,backupBuffer.length-i);
     syncBuf = transfer.concat(syncBuf);
     
@@ -680,53 +851,117 @@ let backupBuffer = [];
 function addToBackupBuffer(el) {
   backupBuffer.push(el);
   if(backupBuffer.length > 86400) {
-    backupBuffer = backupBuffer.slice(backupBuffer.length -86400, backupBuffer.length);
+    backupBuffer = backupBuffer.slice(backupBuffer.length -86400+3600, backupBuffer.length); // cut one hour plus excess
   }
 }
 
+let streamBuffer = [];
+let switchingStream = false;
+
+async function pushToBuffer(fn, jsonLine) {  
+  console.log("target filename = " + fn);
+  if(fn == currentBufferFileName) {
+    currentBufferFileStream.write(jsonLine);
+  }
+  else {
+    if(switchingStream) {
+      streamBuffer.push(jsonLine);
+      console.log("stream switch in progress, placing jsonLine to backLog");
+      return;
+    }
+    switchingStream = true;
+    console.log("filename " + fn + " not matching current stream target: " + currentBufferFileName);
+    let fsStart = new Date(); // measure how long it takes
+    if(currentBufferFileStream) {
+      try {
+        currentBufferFileStream.end();
+      }
+      catch(e) {
+        console.error("failed to close current buffer: " + currentBufferFileName + ": ", e);
+      }
+    }
+    let pos = 0;
+    let stats = null;
+    try {
+      stats = await new Promise((resolve, reject)=>{
+        fs.stat("buffer/"+fn, (err, stats) => {
+          if(err) {
+            // file does not exist
+            console.log("file " + fn + " not found in buffers.");
+            reject(err);
+          }
+          else {
+            resolve(stats);
+          }
+        });
+      });
+      pos = stats.size;
+      console.log("file exists, size = " + pos);
+    }
+    catch(err) {
+      // 
+      console.log("file " + fn + " not existing, creating");
+      let fd = null;
+      try {
+        fd = await new Promise( (resolve, reject) => {
+          fs.open("./buffer/"+fn, "w+",(err,fd) => {
+            if(err) {
+              reject(err);
+            }
+            else {
+              resolve(fd);
+            }
+          });
+        });
+      }
+      catch(e) {
+        console.error("failed to create file " + fn + " in buffer/: ", e);
+      }
+    }
+    console.log("creating new writeStream to buffers/" + fn + " starting from pos " + pos);
+    currentBufferFileStream = fs.createWriteStream("buffer/"+fn, {start:pos});
+    let flushCount = streamBuffer.length+1;
+    currentBufferFileStream.write(jsonLine);
+    for(let l of streamBuffer) {
+      currentBufferFileStream.write(l);
+    }
+    currentBufferFileName = fn;
+    streamBuffer = [];
+    switchingStream = false;
+    console.log("updated write stream and flushed " + flushCount + " lines.");
+    let duration = new Date().getTime() - fsStart.getTime();
+    console.log("new file stream setup took " + duration + " ms.");
+  }
+}
+    
 let syncBuf = [];
+
+let currentBufferFileStream = null;
+let currentBufferFileName = null;
 
 async function pushTopDataRowToCloud(flush){  
   // convert top row in internal buffer to csv line
   let csvLine = measBuffer.convertTopEntryToCsvLine();
-  let fn = getCloudFileNameForEndTime(measBuffer.buf[measBuffer.idx].respTime).split('/').join('_');//new Date(measBuffer.topTime.getTime())).split('/').join('_');
-  
-  syncBuf.push(csvLine);
-  if(flush) syncToCloud();
-  //fs.appendFile("buffer/" + fn, csvLine, (err) => {
-  //  if(err) {console.error("failed to push csvLine to local buffer file " + fn + ": ", err); return;} 
-  //  console.log("line added to local buffer file " + fn+ ": " + csvLine);
-    //if(flush)syncToCloud();
-  //});
+  let jsonLine = JSON.stringify(measBuffer.buf[measBuffer.idx]) +"\r\n";
+  if(measBuffer.buf[measBuffer.idx].leq_s["a"] != 0) {
+    //let fn = getCloudFileNameForEndTime(measBuffer.buf[measBuffer.idx].respTime).split('/').join('_');//new Date(measBuffer.topTime.getTime())).split('/').join('_');
+    
+    syncBuf.push(csvLine);
+    if(flush) syncToCloud();
+  }
+  else {
+    console.log("skipping push to cloud for row " + csvLine.substring(0,19) + " because it is zeros only");
+  }
+  let fn = getCloudFileNameForEndTime(measBuffer.buf[measBuffer.idx].time).replace(/\//g, "-");
+  pushToBuffer(fn, jsonLine);    
 }
 
-/*
-let updatingBlockBlob = 0;
-
-async function updateBlockBlob(fn, t, blobClient) {
-  if(updatingBlockBlob > 1) {
-    console.log("skipping block blob update," + updatingBlockBlock + " updates pending");
-    return;
-  }
-  updatingBlockBlob++;
-  while(updatingBlockBlob > 1){
-    await sleep(100);
-  }
-
-  let blockBlobClient = await containerClient.getBlockBlobClient(fn.substring(0,fn.indexOf("."))+"_bb.csv");
-  console.log("block block update " + t + " starting dest = " + blockBlobClient.url + ", src = " + blobClient.url);
-  try {
-    await blockBlobClient.syncUploadFromURL(blobClient.url);
-    console.log("block blob update from " + t + " done");
-  }
-  catch(e) {
-    console.error("block blob update failed: ",e);
-    console.log(e);
-  }
-  updatingBlockBlob--;
-}
-*/
-let bands = ["A","B","C","Z","6.3Hz","8Hz","10Hz","12.5Hz","16Hz","20Hz","25Hz","31.5Hz","40Hz","50Hz","63Hz","80Hz","100Hz","125Hz","160Hz","200Hz","250Hz","315Hz","400Hz","500Hz","630Hz","800Hz","1kHz","1.25kHz","1.6kHz","2kHz","2.5kHz","3.15kHz","4kHz","5kHz","6.3kHz","8kHz","10kHz","12.5kHz","16kHz","20kHz"];
+let bandLabelMap = {"A":"a","B":"b","C":"c","Z":"z","6.3Hz":"t6","8Hz":"t8","10Hz":"t10","12.5Hz":"t12","16Hz":"t16","20Hz":"t20","25Hz":"t25",
+    "31.5Hz":"t31","40Hz":"t40","50Hz":"t50","63Hz":"t63","80Hz":"t80","100Hz":"t100","125Hz":"t125","160Hz":"t160",
+    "200Hz":"t200","250Hz":"t250","315Hz":"t315","400Hz":"t400","500Hz":"t500","630Hz":"t630","800Hz":"t800","1kHz":"t1000",
+    "1.25kHz":"t1250","1.6kHz":"t1600","2kHz":"t2000","2.5kHz":"t2500","3.15kHz":"t3150","4kHz":"t4k","5kHz":"t5k","6.3kHz":"t6k",
+    "8kHz":"t8k","10kHz":"t10k","12.5kHz":"t12k","16kHz":"t16k","20kHz":"t20k"};
+let bands = Object.keys(bandLabelMap);
 let header = "IntervalEnd\tRespTime\t";
 for(let i = 0; i < bands.length;i++) {
   header += "Leq"+bands[i]+"\t";
@@ -741,49 +976,37 @@ for(let i = 0; i < bands.length;i++) {
   header += "Leq"+bands[i]+"_attn\t";
 }
 
-
-/*
-async function appendToBlob(fn, data, appendToBuffer) {
-  let blobCLient = null;
-  try {
-    blobClient = await containerClient.getAppendBlobClient(fn);
-    let ciner = await blobClient.createIfNotExists();
-    if(ciner.succeeded) {
-      data = header + "\r\n"+data;
-    }
-    await blobClient.appendBlock(data, data.length);
-    console.log("appended " + data + " to blob");
-    
-    return true;
-  }
-  catch(e) {
-    console.error("Failed to append to blob " + fn + ":",e);
-    if(appendToBuffer) {
-      try { 
-        fs.appendFileSync(bufferFile, data);
-        console.log("added to local buffer");
-      }
-      catch(er) {
-        console.log("failed to append to local buffer: ", er);
-        console.error(er);
-      }
-    }
-    return false;
-  }
-}
-*/
+let lastDrop = null;
 
 async function handleMeasurementResponse(respTime, dataStr) {
+  if(deviceState != 1) {
+    console.log("ignoring measurement response because device state not 1");
+    return;
+  }
   let vArr = [new Date(),0]; // time and filter setting 
   for(let i = 0; i < bands.length;i++) {vArr.push(0.0);}
   // add to internal buffer
-  while(measBuffer.currentSize > 0 && respTime.getTime()-measBuffer.topTime.getTime() > 1000) {
-    console.log("internal buffer topTime " + measBuffer.topTime + " is > 1s before respTime " + respTime);
+  while(measBuffer.currentSize > 0 && respTime.getTime()-measBuffer.topTime.getTime() > 2500) {
+    console.log("internal buffer topTime " + measBuffer.topTime + " is > 2.5s before respTime " + respTime + " pushing zero fill value");
     vArr[0] = new Date(measBuffer.topTime.getTime()+1000);
     measBuffer.push(vArr); // add an all zero record to fill the gap
     pushTopDataRowToCloud(false);
   }
-  console.log("dataStr = '" + dataStr + "'");
+  if(measBuffer.topTime.getTime()+1000 > respTime.getTime()) {
+    console.log("received data at " + respTime + " but buffer top already at " + measBuffer.topTime);
+    // if we drop more than one record every 3 hours, the clock would be off too much
+    if(lastDrop && new Date().getTime()-lastDrop.getTime() < 3*3600*1000) { 
+      console.log("lastDropped record at " + lastDrop + ", dropping too many.");
+      console.log("buffer top = " + JSON.stringify(measBuffer.buf[measBuffer.idx]));
+      let prevIdx = measBuffer.idx-1;
+      if(prevIdx <0)prevIdx+=measBuffer.size;
+      console.log("buffer top-1 = " + JSON.stringify(measBuffer.buf[prevIdx]));
+      process.exit(1);
+    }
+    lastDrop = respTime;
+    return;
+  }
+  //console.log("dataStr = '" + dataStr + "'");
   dataStr = "0,"+dataStr; // PCE430 data string starts with filter setting, then one entry per band
   vArr = dataStr.split(",").map((x)=> {return parseFloat(x);});
   vArr[0] = respTime;
@@ -806,74 +1029,106 @@ async function updateAttenuation() {
   if(updAttn) { console.log("update attn in progress, skipping");} // prevent multiple entry
   updAttn = true;
   let base = JSON.parse(JSON.stringify(measBuffer.buf[measBuffer.idx])); // deep copy
+  //console.log("update attn on record ", base);
   for(let i = 0; i < bands.length; i++) {
     let bandConfig = remoteConfig.bandConfig[bands[i]];
     if(!bandConfig) continue;
+    let band = bands[i];
+    let lbl = bandLabelMap[band];
+    //console.log("updating attn for band " + band + ", lbl " + lbl);
     // is the 5m value over the limit
-    let ai = attnInfo[bands[i]];
+    let ai = attnInfo[band];
     let oldLevel = ai.level;
-    if(base["leq_5m"][bands[i]] > bandConfig.limit5m) {
+    if(base["leq_5m"][lbl] > bandConfig.limit5m) {
       // has it been attenuated before?
+      //console.log("band " + band + " over limit: " + base["leq_5m"][lbl] + ", limit = " + bandConfig.limit5m);
       if(ai.lastUpdate) {
         if(new Date().getTime() - ai.lastUpdate.getTime() < bandConfig.minIncDelay) {
           continue; // do nothing yet, wait for delay to elapse
-  }
-  else {
-    if(base["leq_5m"][bands[i]] > ai.v5m) { // it has continued to rise, attenuation not enough
-      console.log("increasing attn for " + bands[i] + " 5m has risen from " + ai.v5m + " at " + ai.lastUpdate + " to " + base["leq_5m"][bands[i]] + " now.");
-      ai.lastUpdate = new Date();
-      ai.v5m = base["leq_5m"][bands[i]];
-      ai.level = bandConfig.limit5m-base["leq_5m"][bands[i]];
-    }
-    else {// 5m is dropping, no need to action
-            ;
-    }
-  }
+        }
+        else {
+          if(base["leq_5m"][lbl] > ai.v5m) { // it has continued to rise, attenuation not enough
+            if(ai.level < bandConfig.limit5m-base["leq_5m"][lbl]) {
+              console.log("5m over limit and rising, current attenuation higher than limit-5m, so not resetting.");
+              ai.lastUpdate = new Date();
+              ai.v5m = base["leq_5m"][lbl];
+            }
+            else {
+              console.log("increasing attn for " + bands[i] + " 5m has risen from " + ai.v5m + " at " + ai.lastUpdate + " to " + base["leq_5m"][lbl] + " now.");
+              ai.lastUpdate = new Date();
+              ai.v5m = base["leq_5m"][lbl];
+              ai.level = bandConfig.limit5m-base["leq_5m"][lbl];
+            }
+          }
+          else {// 5m is dropping, no need to action
+                  ;
+          }
+        }
       }
       else {
         ai.lastUpdate = new Date();
-        ai.level = bandConfig.limit5m-base["leq_5m"][bands[i]];
-        ai.v5m = base["leq_5m"][bands[i]];
+        ai.level = bandConfig.limit5m-base["leq_5m"][lbl];
+        ai.v5m = base["leq_5m"][lbl];
       }
     }
     else { // level is below limit, we could ease off any attenuation
+      //console.log("band " + band + " under limit: " + base["leq_5m"][lbl] + ", limit = " + bandConfig.limit5m);
       if(ai.lastUpdate && (new Date().getTime()-ai.lastUpdate.getTime()) > bandConfig.minDecDelay && ai.level < 0) {
         ai.level = ai.level+1;
         if(ai.level > 0)ai.level = 0;
-        ai.v5m = base["leq_5m"][bands[i]];
+        ai.v5m = base["leq_5m"][lbl];
         ai.lastUpdate = new Date();
-        console.log("reducing attn on band " + bands[i] + ": " + ai.level);
+        console.log("reducing attn on band " + band + ": " + ai.level);
       }
     }
     if(oldLevel != ai.level) {
-      console.log("attn of " + bands[i] + " changed from " + oldLevel + " to " + ai.level);
-      await updateEQ(bands[i], ai.level);
+      console.log("attn of " + band + " changed from " + oldLevel + " to " + ai.level);
+      updateEQ(band, ai.level);
     }
   } // end for-loop over all bands
   updAttn = false;
 }
 
-async function updateEQ(band) {
-  return;
+// need to be careful not queue too many updates here
+async function updateEQ(band, level) {
+  if(["A","B","C","D"].indexOf(band) > -1){
+    console.log("ignoring updateEQ for band " + band + " because it isn't available in GEQ");
+    return;
+  }
+  let frequency = parseFloat(band.replace(/Hz/g, "").replace(/k/g,"000"));
+  if(dsp206) {
+    try {
+      dsp206.setGeqLevel(1, frequency, level);
+      console.log("updated geq of InB on band " + frequency + " to " + level + " dB");
+    }
+    catch(e) {
+      console.log("GEQ update failed trying to set level " + level + " on band " + frequency + " Hz");
+    }
+  }
+  else {
+    console.log("no dsp206, skipping attenuation change");
+  }
 }
 
 
 let timeSyncInterval = null;
-
+let dsp206 = null;
 async function updateConfig() {
-  /*try {
-    await updateDeviceClock();
-  }
-  catch(e) {
-    console.log("error updating device clock on update cycle:",e);
-    console.error(e);
-    process.exit(1);
-  }
-  */
   try {
     let data = await download("remoteConfig.json");
     remoteConfig = JSON.parse(data.toString());
     console.log("updated config from remote: " + data.toString());
+    if(dsp206 && (dsp206.deviveID != remoteConfig.dsp206Config.deviceID || dsp206.ipAddress != remoteConfig.dsp206Config.ipAddress)) {
+      console.log("config for dsp206 changed, tearing down instance...");
+      try {
+        dsp206.close();
+      }
+      catch(e) {
+        console.error("error closing dsp206: ", e);
+      }
+    }
+    dsp206 = new Dsp206(remoteConfig.dsp206Config.deviceID, remoteConfig.dsp206Config.ipAddress);
+    console.log("created new dsp206 instance");        
   }
   catch(e) {
     console.error(e);
@@ -907,20 +1162,31 @@ async function streamToBuffer(readableStream) {
 }
 
 async function startup() {
-  await discoverDevice();
 
+  try {
+    await stopMeasurement();
+    console.log("measurement not running");
+  }
+  catch(e) {
+    console.log("measurement stop failed: ", e);
+  }
+  
+ 
   await initBuffer();
+
+  await discoverDevice();
 
   await initBlobClient();
 
   await updateConfig();
-  setInterval(updateConfig, 1000*3600);
+  setInterval(updateConfig, 1000*30); // alle 30 s
 
 
   await startMeasurement();
 }
 
 async function run() {
+  let startupTime = new Date();
   state = "startup";
   while(state == "startup") {
     try {
@@ -934,6 +1200,45 @@ async function run() {
     }
   }
 
+  
+  while(true){
+    console.log("checking for stale local files...");
+    fs.readdir("buffer/", (err, files) => {
+      if(err) {
+        console.error("error listing buffer files on shutdown check: ", e);
+      }
+      else {
+        for(let fn of files) {
+          let timeStr = fn.replace(/\//g, "-");
+          timeStr = timeStr.substring(0,10)+"T"+timeStr.substring(11,13)+":00:00.000Z";
+          let fnDate = new Date(timeStr);
+          console.log("checking file " + fn + " with timeStr " + timeStr + " -> Date " + fnDate);
+          if(new Date().getTime() - fnDate.getTime() > 2*3600*1000) {
+            console.log("file " + fn + " older than two hours, deleting...");
+            fs.unlink("buffer/"+fn, (err) => {
+              if(err) {
+                console.error("failed to delete file " + fn + ": ", err);
+              }
+              else {
+                console.log("successfully deleted " + fn);
+              }
+            });
+          }
+        }
+      }
+    });
+
+    console.log("checking shutdown condition");
+    await sleep(10*60*1000); // wait ten minutes
+    if(new Date().getTime() - startupTime.getTime() > 23*3600*1000 && new Date().getUTCHours() == 10
+       && uplink.status == "online" && new Date().getTime() - uplink.joinTime.getTime() < 5*60*1000) {
+      // only if online and connected a few minutes can we be sure that we don't have local data not yet synced to cloud
+      console.log("shutdown condition met: between 10 and 11 UTC and online for at least 5 minutes. shutting down...");
+      await stopMeasurement();
+      process.exit(0);
+    }
+  }
+  
 }
 
 run();
