@@ -20,6 +20,7 @@
     "@azure/storage-blob": "^12.8.0",
     "@types/dotenv": "^8.2.0",
     "dotenv": "^16.0.0",
+    "node-webcam": "^0.8.0",
     "serialport": "^10.3.0",
     "ws": "^8.5.0"
   }

@@ -8,3 +8,5 @@ log*.txt
 dsp206.js
 .index.js.swp
 remoteConfig.json
+*.png
+*.jpeg

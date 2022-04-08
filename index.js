@@ -6,7 +6,7 @@ const {DelimiterParser} = require('@serialport/parser-delimiter')
 const {BlobServiceClient} = require('@azure/storage-blob');
 const {Dsp206} = require('./dsp206.js');
 
-const serialUSB = new SerialPort({path:"/dev/ttyUSB0", baudRate: 9600});
+let serialUSB = null;
 const serialAMA = new SerialPort({path:"/dev/ttyAMA0", baudRate: 9600});
 const config = require("./config.json");
 
@@ -17,6 +17,7 @@ let state = "new";
 let blobServiceClient;
 let containerClient;
 let lastTimeSync = null;
+let lastSerialData = new Date();
 
 let logfn = console.log
 console.log = function(){
@@ -74,7 +75,7 @@ uplink.interval = setInterval(async ()=>{
       return;
     }
     else {
-      console.log("" + new Date() + ": sending ping to server");
+      //console.log("" + new Date() + ": sending ping to server");
       sendRemoteCommand({command:"clientPing",params:[]});
     }
   }
@@ -276,13 +277,22 @@ class MeasurementBuffer {
     let idx = this.idx;
     let start5m = idx - dt/1000+1;
     if(start5m < 0) start5m = this.size+start5m;
-    console.log("5m start idx = " + start5m + ", time = " + this.getTime(start5m));
+    //console.log("5m start idx = " + start5m + ", time = " + this.getTime(start5m));
     this.aggregateWindow(start5m, "leq_5m");
+
+    dt = 10*1000;
+    if(this.topTime.getTime() - this.startTime.getTime() < dt) {
+      dt = (this.topTime.getTime()-this.startTime.getTime());
+    }
+    let start10s = idx - dt/1000+1;
+    if(start10s < 0) start10s = this.size+start10s;
+    //console.log("10s start idx = " + start10s + ", time = " + this.getTime(start10s));
+    this.aggregateWindow(start10s, "leq_10s");
 
     // define 1h window
     let start1h = idx+1;
     if(start1h > this.size-1)start1h = start1h-this.size;
-    console.log("1h start index is " + start1h + ", time = " + this.buf[start1h].time);
+    //console.log("1h start index is " + start1h + ", time = " + this.buf[start1h].time);
     this.aggregateWindow(start1h, "leq_1h");
 
   }
@@ -309,13 +319,13 @@ class MeasurementBuffer {
       }
       binCount++;
     }
-    console.log("binCount = " + binCount);
+    //console.log("binCount = " + binCount);
     //now divide energy equivalent by bins (=s) to get power, then convert to SPL
     for(let l of Object.keys(target["ee"])) {
       target[name][l] /= binCount;
       target[name][l] = 10*Math.log10(target[name][l]);
     }
-    console.log("aggregate window done");
+    //console.log("aggregate window done");
   }
 
   /* takes a value array as argument that has Date object (measurement arrival time) at index 0,
@@ -408,11 +418,13 @@ function zeroPad(number, digits) {
   return res;
 }
 
-const parserUSB = serialUSB.pipe(new DelimiterParser({delimiter: '\n'}));
+let parserUSB = null;
+
 let responsePromise = null;
-parserUSB.on('data', (data) => { 
+function handleData(data) {
   
   let respTime = new Date();
+  lastSerialData = respTime; // track each request so we can detect when we lost the PCE 430
   console.log("received on serial (USB): " + data.toString()); 
   let start = 0;
   while(data[start] != 0x2) {
@@ -467,7 +479,7 @@ parserUSB.on('data', (data) => {
     return;
   }
 
-});
+}
 
 let parserAMA = serialAMA.pipe(new ReadlineParser({delimiter: '\r\n'}));
 parserAMA.on('data', (data) => { console.log("received on AMA:"+data);});
@@ -527,8 +539,13 @@ function sleep(millis) {
   return new Promise(resolve => setTimeout(resolve, millis));
 }
 
-async function discoverDevice() {
+async function initSerialDevice() {
   while(deviceState == 0) {
+    console.log("recreating serial port...");
+    serialUSB = new SerialPort({path:"/dev/ttyUSB0", baudRate: 9600});
+    parserUSB = serialUSB.pipe(new DelimiterParser({delimiter: '\n'}));
+    parserUSB.on('data', handleData);
+    
     try {
       let res = await serialCommand("STA","?");
       console.log("Received from STA?: '\n" + res + "\n'");
@@ -601,6 +618,7 @@ async function applyJsonLinesToBuffer(csv, start) {
     let lineTime = new Date(line.time);
     lineTime.setMilliseconds(0);
     console.log("lineTime = " + lineTime);
+    line.time = lineTime;
     if(start && lineTime.getTime() < start.getTime()) {
       console.log("skipping line " + i + " at " + lineTime);
       continue;
@@ -859,7 +877,7 @@ let streamBuffer = [];
 let switchingStream = false;
 
 async function pushToBuffer(fn, jsonLine) {  
-  console.log("target filename = " + fn);
+  //console.log("target filename = " + fn);
   if(fn == currentBufferFileName) {
     currentBufferFileStream.write(jsonLine);
   }
@@ -1025,7 +1043,7 @@ let attnInfo = {};
 for(let i = 0; i < bands.length;i++) {
   attnInfo[bands[i]] = {lastUpdate:null,level:0.0,v5m:null,v1h:null};
 }
-async function updateAttenuation() {
+async function updateAttenuation_old() {
   if(updAttn) { console.log("update attn in progress, skipping");} // prevent multiple entry
   updAttn = true;
   let base = JSON.parse(JSON.stringify(measBuffer.buf[measBuffer.idx])); // deep copy
@@ -1089,6 +1107,106 @@ async function updateAttenuation() {
   updAttn = false;
 }
 
+/**
+ * Slope based approach: check slope of leq_5m value since last attn update
+ * if slope is rising and over limit, increase attenuation
+ * if slope is rising towards limit, ease it off by pulling down the respective EQ band some more
+ * if slope is decreasing towards limit from above, decide whether it is quick enough to still meet the limit on 1h average
+ * if slope is decreasing and 5m lower than limit, ease off attenuation
+ */
+async function updateAttenuation() {
+  if(updAttn) { console.log("update attn in progress, skipping");} // prevent multiple entry
+  updAttn = true;
+  let geqSetting = null;
+  try {
+    geqSetting = await dsp206.getGeqConfig(1); // InB, returns array of {bandId, frequency, level} structs
+    //console.log("received current InB GEQ: " + JSON.stringify(geqSetting));
+  }
+  catch(e) {
+    console.error("Error getting geq config: ", e);
+    updAttn = false;
+    return;
+  }
+  
+  let base = JSON.parse(JSON.stringify(measBuffer.buf[measBuffer.idx])); // deep copy
+  base.time = new Date(base.time);
+  //console.log("update attn on record " + JSON.stringify(base)+ ", base.time = " + (typeof base.time) + ", top entry time: " + measBuffer.buf[measBuffer.idx].time);
+  for(let i = 0; i < bands.length; i++) {
+    let bandConfig = remoteConfig.bandConfig[bands[i]];
+    if(!bandConfig) continue;
+    let band = bands[i];
+    let lbl = bandLabelMap[band];
+    //console.log("updating attn for band " + band + ", lbl " + lbl);
+    // is the 5m value over the limit
+    let ai = attnInfo[band];
+    let aiCurrentLevel = i>8?geqSetting[i-9].level:0;
+    
+    if(ai.lastUpdate) {
+      if(new Date().getTime() - ai.lastUpdate.getTime() < Math.min(bandConfig.minIncDelay, bandConfig.minDecDelay)) {
+        continue; // do nothing yet, wait for delay to elapse
+      }
+    }
+    let oldLevel = ai.level;
+    let current5mlevel = base["leq_5m"][lbl];
+    let current10slevel = base["leq_10s"][lbl];
+    let current1hlevel = base["leq_1h"][lbl];
+    let slope = ai.lastUpdate?(current10slevel - oldLevel)/(base.time.getTime()-ai.lastUpdate.getTime()):0;
+    let slopeFactor = 0.1;
+    let maxAllowedSlope = (bandConfig.limit5m - current10slevel)*slopeFactor;
+    /*if(bandConfig.limit1h < current1hlevel) {
+      let mas1h = 0;
+      maxAllowedSlope = Math.min(maxAllowedSlope, mas1h);
+      console.log("limiting maxAllowedSlope of " + band + " by 1h limit");
+    }*/
+    console.log("slope " + band + " = " + slope + ", maxAllowedSlope = " + maxAllowedSlope + ", slope over time " + (ai.lastUpdate?base.time.getTime()-ai.lastUpdate.getTime():"no") + " ms");
+    
+    if(slope > maxAllowedSlope) { // we are already over limit in 5m
+      // has it been attenuated before?
+      //console.log("band " + band + " over limit: " + base["leq_5m"][lbl] + ", limit = " + bandConfig.limit5m);
+      if(ai.lastUpdate && new Date().getTime() - ai.lastUpdate.getTime() < bandConfig.minIncDelay) {
+        continue; // do nothing yet, wait for delay to elapse
+      }
+      if(oldLevel != aiCurrentLevel) {
+        // skip update since we haven't seen effect of last update yet
+        console.log("current geq level " + aiCurrentLevel + " of band " + band + " not set to target " + oldLevel + " yet, no further adjustment for now.");
+      }
+      else {
+        // increase attenuation
+        let attnDelta = 0.5; // 1 dB steps, regardless of slope
+        if(current10slevel - bandConfig.limit5m > 2) {
+          attnDelta = 1;
+          console.log("setting attn delta to " + attnDelta + " due to 2 db excess peak");
+        }
+        else if(current10slevel - bandConfig.limit5m > 4) {
+          attnDelta = 3;
+          console.log("setting attn delta to " + attnDelta + " due to 4 db excess peak");
+        }
+        ai.level = oldLevel - attnDelta;
+        if(ai.level < -12)ai.level = -12;
+        ai.v5m = current5mlevel;
+        ai.v10s = current10slevel;
+        ai.lastUpdate = new Date();
+      }
+    }
+    else { // slope is ok
+      if(ai.lastUpdate && (new Date().getTime()-ai.lastUpdate.getTime()) > bandConfig.minDecDelay && ai.level < 0) {
+        let attnDelta=0.5;
+        ai.level = oldLevel + attnDelta;
+        if(ai.level > 0)ai.level = 0;
+        ai.v5m = current5mlevel;
+        ai.v10s = current10slevel;
+        ai.lastUpdate = new Date();
+        console.log("reducing attn on band " + band + ": " + ai.level);
+      }
+    }
+    if(aiCurrentLevel != ai.level) {
+      console.log("attn of " + band + " is " + aiCurrentLevel + ", not matching current target " + ai.level);
+      await updateEQ(band, ai.level);
+    }
+  } // end for-loop over all bands
+  updAttn = false;
+}
+
 // need to be careful not queue too many updates here
 async function updateEQ(band, level) {
   if(["A","B","C","D"].indexOf(band) > -1){
@@ -1098,7 +1216,7 @@ async function updateEQ(band, level) {
   let frequency = parseFloat(band.replace(/Hz/g, "").replace(/k/g,"000"));
   if(dsp206) {
     try {
-      dsp206.setGeqLevel(1, frequency, level);
+      await dsp206.setGeqLevel(1, frequency, level);
       console.log("updated geq of InB on band " + frequency + " to " + level + " dB");
     }
     catch(e) {
@@ -1118,22 +1236,40 @@ async function updateConfig() {
     let data = await download("remoteConfig.json");
     remoteConfig = JSON.parse(data.toString());
     console.log("updated config from remote: " + data.toString());
-    if(dsp206 && (dsp206.deviveID != remoteConfig.dsp206Config.deviceID || dsp206.ipAddress != remoteConfig.dsp206Config.ipAddress)) {
-      console.log("config for dsp206 changed, tearing down instance...");
-      try {
-        dsp206.close();
-      }
-      catch(e) {
-        console.error("error closing dsp206: ", e);
+    if(dsp206) {
+      if(dsp206.deviceID != remoteConfig.dsp206Config.deviceID || dsp206.ipAddress != remoteConfig.dsp206Config.ipAddress) {
+        console.log("config for dsp206 changed, tearing down instance...");
+        try {
+          dsp206.close();
+          dsp206 = new Dsp206(remoteConfig.dsp206Config.deviceID, remoteConfig.dsp206Config.ipAddress);
+          console.log("recreated dsp206 instance with new config");
+        }
+        catch(e) {
+          console.error("error closing dsp206: ", e);
+        }
       }
     }
-    dsp206 = new Dsp206(remoteConfig.dsp206Config.deviceID, remoteConfig.dsp206Config.ipAddress);
-    console.log("created new dsp206 instance");        
+    else {
+      dsp206 = new Dsp206(remoteConfig.dsp206Config.deviceID, remoteConfig.dsp206Config.ipAddress);
+      console.log("created new dsp206 instance");
+    }
   }
   catch(e) {
     console.error(e);
     console.log("error updating remoteConfig: ", e);
-    process.exit(1);
+  }
+  if(new Date().getTime() - lastSerialData.getTime() > 10000) {
+    // havent received any input from serial, probably disconnect or measurement stopped
+    deviceState = 0;
+    try {
+      console.log("no new serial data since " + lastSerialData.toISOString() + ", restarting measurement...");
+      await initSerialDevice();
+      console.log("serial device initialized.");
+      await restartMeasurement();
+    }
+    catch(e) {
+      console.error("unable to stop /restart measurement: ", e);
+    }
   }
 }
 
@@ -1174,7 +1310,7 @@ async function startup() {
  
   await initBuffer();
 
-  await discoverDevice();
+  await initSerialDevice();
 
   await initBlobClient();
 
