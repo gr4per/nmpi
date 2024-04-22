@@ -1,0 +1,8 @@
+25.01.2023 Helmut, Frank, Arne: 40Hz+3, 50Hz+1.5 80Hz-4, 100Hz+3 in Eventkirche eingestellt am Soundcraft EQ Profil Sub Kanal
+16.04.2024 Helmut, Frank, Arne, Nele: Besprechung und Tests nach dramatischer Überschreitung der Bass-Limits. Wir haben Rosa-Rauschen angelegt und 
+die Lautstärke Schritt für Schritt erhöht um den Bass Limiter zu testen. 
+Die Lautstärke in den Bass-Kanälen ist proportional zur Gesamtlautstärke gestiegen, kein Limit erkennbar (Quelle +7.8dB, Master +5.2dB), einzelne Bänder bis 100dB (80Hz, 63Hz)
+Mit Musik und EQ in den DJ L und DJ R Eingangskanälen verifiziert: Wenn man im PEQ mehr Bass im Eingang gibt, kommt auch mehr raus (bei Gesamtlautstärke 90dB durch Mikro-Limiter)
+Wir haben uns geeinigt, sofort den Bass-Boost aus DJ-L und DJ-R rauszunehmen (flat) und so schnell wie möglich Satis&Fy den Bass-Limiter einstellen zu lassen.
+
+

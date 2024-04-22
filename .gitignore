@@ -7,3 +7,6 @@ buffer/
 log.txt
 .index.js.swp
 remoteConfig.json
+*.JPG
+*.jpeg
+*.png
