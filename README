@@ -2,15 +2,32 @@
 
 ## Setup PI
 
+#create ubuntu SD Card for raspberry pi 4
+#https://ubuntu.com/tutorials/how-to-sdcard-ubuntu-server-raspberry-pi#1-overview
+# i.e. install raspberry pi imager for windows
+# then choose 4 B model and generic OS
+# then ubuntu LTS server 64 bit (whatever is latest version)
+# define hostname (in this example ubuntu, but feel free to choose nmpi-evkdo-2 or similar in order to ease docs)
+# define username as fit (put in nmpi docs), e.g. ubuntu but anything goes, same for password
+# WIFI: setup location wifi or adequate, e.g. home wifi for remote measurements or phone wifi for demo
+# be aware further config of the raspi need to be done by this network as physical will be disabled if wifi is set
+# set timezone to berlin and keyboard layout to de
+# services: add public key raspi_arne_rsa or as needed for project
+# proceed with creating image
+
+# Connect raspi to the network of your computer used to setup the PI
+# open a linux shell (e.g. git bash on windows)
+
 ```
 export RASPI_PUB_KEY=/path/to/your/rsa.pub
+export SSH_PORT=<ssh port>
 ./remote_instr.sh
 ```
 
 ## local shell to ssh to PI
 eval $(ssh-agent -s)
 ssh-add /d/HiDrive/ssh/raspi_arne_rsa
-ssh -p 58736 ubuntu@ubuntu
+ssh -p $SSH_PORT ubuntu@ubuntu
 
 export GIT_SSH=/d/Programme/Git/usr/bin/ssh.exe
 
