@@ -2,15 +2,34 @@
 
 ## Setup PI
 
+#create ubuntu SD Card for raspberry pi 4
+#https://ubuntu.com/tutorials/how-to-sdcard-ubuntu-server-raspberry-pi#1-overview
+# i.e. install raspberry pi imager for windows
+# then choose 4 B model and generic OS
+# then ubuntu LTS server 64 bit (whatever is latest version)
+# define hostname (in this example ubuntu, but feel free to choose nmpi-evkdo-2 or similar in order to ease docs)
+# define username as fit (put in nmpi docs), e.g. ubuntu but anything goes, same for password
+# WIFI: setup location wifi or adequate, e.g. home wifi for remote measurements or phone wifi for demo
+# be aware further config of the raspi need to be done by this network as physical will be disabled if wifi is set
+# set timezone to berlin and keyboard layout to de
+# services: add public key raspi_arne_rsa or as needed for project
+# proceed with creating image
+
+# Connect raspi to the network of your computer used to setup the PI
+# open a linux shell (e.g. git bash on windows)
+
 ```
 export RASPI_PUB_KEY=/path/to/your/rsa.pub
+export SSH_PORT=<ssh port>
 ./remote_instr.sh
 ```
 
 ## local shell to ssh to PI
 eval $(ssh-agent -s)
 ssh-add /d/HiDrive/ssh/raspi_arne_rsa
-ssh -p 58736 ubuntu@ubuntu
+ssh -p $SSH_PORT ubuntu@ubuntu
+
+export GIT_SSH=/d/Programme/Git/usr/bin/ssh.exe
 
 # PI
 
@@ -22,12 +41,95 @@ sudo systemctl stop serial-getty@ttyS0.service
 sudo systemctl disable serial-getty@ttyS0.service
 sudo systemctl mask serial-getty@ttyS0.service
 
+## install webcam
+'''
+sudo apt-get install fswebcam
+'''
 
+## turn on routing so we can reach dsp206 vi pi
+'''
+sudo vi /etc/sysctl.conf
+'''
+then 
+'''
+# Uncomment the next line to enable packet forwarding for IPv4
+#net.ipv4.ip_forward=1
+'''
+
+## install huawei e5577 as internet gateway
+
+see also https://wiki.ubuntuusers.de/USB_ModeSwitch/
+
+'''
+sudo apt-get install usb-modeswitch usb-modeswitch-data 
+
+lsusb
+
+sudo nano /etc/usb_modeswitch.conf
+'''
+not huawei device id from lsusb output and adjust following snippet
+
+add this to the file: (doesnt seem to work, says class 2, expected 8)
+'''
+#--------------------------
+#HUAWEI DIGI CONF
+#12d1:14db
+
+DefaultVendor=0x12d1
+DefaultProduct=0x14db
+
+TargetVendor=0x12d1
+TargetProduct=0x14db
+
+MessageContent="55534243123456780000000000000011062000000101000100000000000000"
+#--------------------------
+'''
+nevertheless we get eth1 in 'ifconfig -a' list and it can be configured using
+'sudo dhclient eth1"
+
+We need to modify '/etc/netplan/50-cloud-init.yaml'
+and add config for eth1 to make sure huawei mobile via eth1 is configured with auto dhcp
+add in 'networs: ethernets:'
+'''
+        eth1:
+            dhcp4: true
+            optional: true
+'''
+
+
+'''
+reboot
+
+'''
+
+## Run nmpi as a service
+'''
+sudo npm install pm2@latest -g
+cd nmpi
+pm2 start index.js
+pm2 startup systemd
+'''
+copy the last line from the output and 
+'''
+sudo env PATH=$PATH:/usr/local/bin /usr/local/lib/node_modules/pm2/bin/pm2 startup systemd -u ubuntu --hp /home/ubuntu
+'''
+then save the config
+'''
+pm2 save
+'''
+
+also ensure log file doesnt clog the sd card
+'''
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 5G
+'''
 ##required tools
 sudo apt install nodejs
 sudo apt install npm
 npm install 
 sudo apt install alsa-utils
+sudo apt install netscript-2.4 # for testing purpose only, take wifi down to make sure mobile connection over eth1 is used
+sudo apt  install network-manager # for testing purposes
 
 ## for the uca202, add this to /etc/asound.conf
 pcm.!default    front:CODEC # USB Soundcard
@@ -75,3 +177,11 @@ and Ptot ~ A*p0^2* SUM_i(10^(Lpi/10)*dti)/SUM_i(dti)
 with this the total equivalent SPL is
 ptot^2 = Ptot/A => ptot^2 = p0^2 * SUM_i(10^(Lpi/10)*dti)/T
 and Lptot = 20 log (ptot/p0)
+
+# CI/CD
+
+Create Azure App service
+basic linux service plan B1
+
+Create repo for the app on docker hub gr4per/nms
+

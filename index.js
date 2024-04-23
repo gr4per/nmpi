@@ -1115,6 +1115,21 @@ async function updateAttenuation_old() {
  * if slope is decreasing and 5m lower than limit, ease off attenuation
  */
 async function updateAttenuation() {
+  let algorithm = remoteConfig.algorithm;
+  algorithm = algorithms[algorithm];
+  if(!algorithm) {
+    algorithm = attnNoop;
+  }
+  algorithm();
+}
+
+const algorithms = {"noop":attnNoop, "slope":attnSlopeBased};
+
+async function attnNoop() {
+  return;
+}
+
+async function attnSlopeBased() {
   if(updAttn) { console.log("update attn in progress, skipping");} // prevent multiple entry
   updAttn = true;
   let geqSetting = null;
@@ -1231,11 +1246,20 @@ async function updateEQ(band, level) {
 
 let timeSyncInterval = null;
 let dsp206 = null;
+let remoteConfig = {};
+
 async function updateConfig() {
   try {
+    let prevAlgo = remoteConfig.algorithm;
     let data = await download("remoteConfig.json");
     remoteConfig = JSON.parse(data.toString());
     console.log("updated config from remote: " + data.toString());
+    if(prevAlgo != remoteConfig.algorithm) {
+      console.log("new attenuation algorithm in remoteConfig update: " + remoteConfig.algorithm);
+      for(let ai of Object.values(attnInfo)) {
+        ai.level = 0;
+      }
+    }
     if(dsp206) {
       if(dsp206.deviceID != remoteConfig.dsp206Config.deviceID || dsp206.ipAddress != remoteConfig.dsp206Config.ipAddress) {
         console.log("config for dsp206 changed, tearing down instance...");
