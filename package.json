@@ -22,6 +22,7 @@
     "dotenv": "^16.0.0",
     "node-webcam": "^0.8.0",
     "serialport": "^10.3.0",
-    "ws": "^8.5.0"
+    "ws": "^8.5.0",
+    "dsp206": "https://github.com/gr4per/dsp206.git"
   }
 }

@@ -4,7 +4,7 @@ const {SerialPort} = require('serialport')
 const {ReadlineParser} = require('@serialport/parser-readline');
 const {DelimiterParser} = require('@serialport/parser-delimiter')
 const {BlobServiceClient} = require('@azure/storage-blob');
-const {Dsp206} = require('./dsp206.js');
+const {Dsp206} = require('./node_modules/dsp206/dsp206.js');
 
 let serialUSB = null;
 const serialAMA = new SerialPort({path:"/dev/ttyAMA0", baudRate: 9600});
@@ -936,7 +936,7 @@ async function pushToBuffer(fn, jsonLine) {
         console.error("failed to create file " + fn + " in buffer/: ", e);
       }
     }
-    console.log("creating new writeStream to buffers/" + fn + " starting from pos " + pos);
+    console.log("creating new writeStream to buffer/" + fn + " starting from pos " + pos);
     currentBufferFileStream = fs.createWriteStream("buffer/"+fn, {start:pos});
     let flushCount = streamBuffer.length+1;
     currentBufferFileStream.write(jsonLine);
@@ -1365,7 +1365,7 @@ async function run() {
     console.log("checking for stale local files...");
     fs.readdir("buffer/", (err, files) => {
       if(err) {
-        console.error("error listing buffer files on shutdown check: ", e);
+        console.error("error listing buffer files on shutdown check: ", err);
       }
       else {
         for(let fn of files) {
