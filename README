@@ -11,6 +11,8 @@
 # define username as fit (put in nmpi docs), e.g. ubuntu but anything goes, same for password
 # WIFI: setup location wifi or adequate, e.g. home wifi for remote measurements or phone wifi for demo
 # be aware further config of the raspi need to be done by this network as physical will be disabled if wifi is set
+# ALTERNATIVE: 
+# skip wifi and continue to setup via physical network
 # set timezone to berlin and keyboard layout to de
 # services: add public key raspi_arne_rsa or as needed for project
 # proceed with creating image
@@ -18,28 +20,63 @@
 # Connect raspi to the network of your computer used to setup the PI
 # open a linux shell (e.g. git bash on windows)
 
+## local shell to ssh to PI
 ```
-export RASPI_PUB_KEY=/path/to/your/rsa.pub
 export SSH_PORT=<ssh port>
+export RASPI_HOSTNAME=<raspi_hostname>
+eval $(ssh-agent -s)
+ssh-add /d/HiDrive/ssh/raspi_arne_rsa
+ssh ubuntu@<RASPI_HOSTNAME>
+```
+## Now you got a shell to the RASPI
+```
+sudo vi /etc/netplan/50-cloud-init.yaml
+```
+
+#paste content:
+```
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true
+  wifis:
+    wlan0:
+      dhcp4: true
+      optional: true
+      access-points:
+        "<wifi SSID>":
+          password: "<wifi passwd>"
+          hidden: false
+
+```
+# reboot the raspi
+```
+sudo reboot
+```
+
+# now switch SSH to proper non-standard port <SSH_PORT>
+```
 ./remote_instr.sh
 ```
 
-## local shell to ssh to PI
-eval $(ssh-agent -s)
-ssh-add /d/HiDrive/ssh/raspi_arne_rsa
-ssh -p $SSH_PORT ubuntu@ubuntu
 
 export GIT_SSH=/d/Programme/Git/usr/bin/ssh.exe
 
 # PI
 
 ## manual one time config on raspi
+```
 sudo adduser ubuntu tty
 sudo adduser ubuntu dialout
 
 sudo systemctl stop serial-getty@ttyS0.service
 sudo systemctl disable serial-getty@ttyS0.service
 sudo systemctl mask serial-getty@ttyS0.service
+
+sudo apt install net-tools
+```
 
 ## install webcam
 '''
@@ -67,7 +104,7 @@ lsusb
 
 sudo nano /etc/usb_modeswitch.conf
 '''
-not huawei device id from lsusb output and adjust following snippet
+note huawei device id from lsusb output and adjust following snippet
 
 add this to the file: (doesnt seem to work, says class 2, expected 8)
 '''
@@ -101,6 +138,12 @@ add in 'networs: ethernets:'
 reboot
 
 '''
+## Install nodejs ( git comes with ubuntu server)
+```
+sudo apt install net-tools
+sudo apt install nodejs
+sudo apt install npm
+```
 
 ## Run nmpi as a service
 '''
@@ -124,8 +167,6 @@ pm2 install pm2-logrotate
 pm2 set pm2-logrotate:max_size 5G
 '''
 ##required tools
-sudo apt install nodejs
-sudo apt install npm
 npm install 
 sudo apt install alsa-utils
 sudo apt install netscript-2.4 # for testing purpose only, take wifi down to make sure mobile connection over eth1 is used
@@ -158,8 +199,6 @@ wifis:
 sudo apt-get install setserial
 sudo apt install net-tools
 sudo apt install python3.8
-
-DefaultEndpointsProtocol=https;AccountName=nmpi;AccountKey=/E26CuQzmgfuTQakwTjsWXaV0oGJkxEVNKIceAt9qvW03m0D3HCghf02TU3FjlBF0NSiN8ZKVcWQPAQBY/iJzw==;EndpointSuffix=core.windows.net
 
 ## local git 
 eval $(ssh-agent -s)

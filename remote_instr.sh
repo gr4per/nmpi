@@ -9,11 +9,7 @@ export RASPI_USER=ubuntu
 
 # get ip
 RASPI_IP=$(ping $RASPI_HOSTNAME -n 1 | grep -E "Antwort von (.*?):" | sed -r 's/Antwort von (.*?):.*/\1/g')
-echo "RASPI IP = " + $RASPI_IP
-
-# transfer pub key to raspi
-scp $RASPI_PUB_KEY $RASPI_USER@$RASPI_HOSTNAME:/home/$RASPI_USER/public_keyfile
-echo "PUB KEY transferred to RASPI"
+echo "RASPI IP = "  $RASPI_IP
 
 # connect 1st ssh
 ssh $RASPI_USER@$RASPI_HOSTNAME << ENDSSH
@@ -25,9 +21,6 @@ else
    echo ".ssh has to be created"
    mkdir .ssh
 fi
-touch .ssh/authorized_keys
-cat public_keyfile > .ssh/authorized_keys
-rm public_keyfile
 
 sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
